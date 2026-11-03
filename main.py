@@ -79,7 +79,7 @@ def run_stock_check():
       else:
         target_series = df_recent["Volume"]
 
-      # 2. 전반부(앞 10일) vs 후반부(뒤 10일) 평균 거래량 비교 조건 (40% 이상 증가)
+      # 2. 전반부(앞 10일) vs 후반부(뒤 10일) 평균 거래량 비교 조건 (30% 이상 증가)
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
 
@@ -90,7 +90,7 @@ def run_stock_check():
 
       is_volume_expanded = vol_growth_ratio >= 0.40
 
-      # 3. 꾸준한 수급 조건 (20거래일 중 10일 이상 전일 대비 증가) - 수정됨
+      # 3. 꾸준한 수급 조건 (20거래일 중 10일 이상 전일 대비 증가) 
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
       is_steady_accumulating = inc_days_count >= 10
