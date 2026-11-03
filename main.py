@@ -10,32 +10,40 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 
 def send_telegram_message(message):
-  """텔레그램 메시지 전송 함수"""
+  """텔레그램 메시지 전송 함수 (글자 수 제한 방지를 위해 분할 전송 가능)"""
   if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("[경고] 텔레그램 토큰 또는 챗 ID가 설정되지 않았습니다.")
     return
 
   url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-  payload = {
-      "chat_id": TELEGRAM_CHAT_ID,
-      "text": message,
-      "parse_mode": "Markdown",
-  }
-
-  try:
+  
+  if len(message) > 4000:
+    chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+    for chunk in chunks:
+      payload = {
+          "chat_id": TELEGRAM_CHAT_ID,
+          "text": chunk,
+          "parse_mode": "Markdown",
+      }
+      requests.post(url, data=payload, timeout=10)
+    print("텔레그램 분할 알림 전송 성공!")
+  else:
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+    }
     response = requests.post(url, data=payload, timeout=10)
     if response.status_code == 200:
       print("텔레그램 알림 전송 성공!")
     else:
       print(f"텔레그램 알림 전송 실패: {response.text}")
-  except Exception as e:
-    print(f"텔레그램 전송 중 오류 발생: {e}")
 
 
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [박스권 20% + 수급 및 거래대금 조건별 스크리닝] 실행: {now_str}")
+  print(f" [박스권 20% + 수급/거래대금 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -51,7 +59,7 @@ def run_stock_check():
     print(f"종목 리스트 불러오기 오류: {e}")
     tickers = ["005930", "000660", "035420", "035720", "051910"]
 
-  # pykrx를 통한 기관 순매수 데이터 가져오기 (출처: pykrx 라이브러리)
+  # pykrx를 통한 기관 순매수 데이터 가져오기 (오류 방지 예외 처리 강화)
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=35)
   start_str = start_date_dt.strftime("%Y%m%d")
@@ -70,11 +78,11 @@ def run_stock_check():
         for ticker, row in df_inst.iterrows():
           inst_net_dict[ticker] = row["기관합계"]
   except Exception as e:
-    print(f"pykrx 기관 순매수 데이터 로드 중 오류 발생: {e}")
+    print(f"pykrx 기관 순매수 데이터 로드 중 예외 발생 (기본값 0 처리): {e}")
 
-  cond1_results = []  # 조건 1: 박스권(20%) + 후반부 거래대금/량 15%↑
-  cond2_results = []  # 조건 2: 박스권(20%) + 증가일 10일 이상
-  cond3_results = []  # 조건 3: 박스권(20%) + 2배 이상 폭발 1회 이상
+  cond1_results = []
+  cond2_results = []
+  cond3_results = []
 
   for ticker in tickers:
     try:
@@ -106,34 +114,32 @@ def run_stock_check():
       # 2. 거래대금 우선 고려 (없으면 거래량 사용)
       if "Amount" in df_recent.columns:
         target_series = df_recent["Amount"]
-        unit_str = "원"
       else:
         target_series = df_recent["Volume"]
-        unit_str = "주"
 
       inst_net_buy = inst_net_dict.get(ticker, 0)
       inst_str = f"기관 누적 순매수: {inst_net_buy:,}주(원)"
 
-      # --- [조건 1] 박스권 + 후반부 10일 평균이 전반부 10일 평균보다 15% 이상 증가 ---
+      # --- [조건 1] 박스권 + 후반부 10일 평균이 전반부 10일 평균보다 20% 이상 증가 ---
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
       growth_ratio = (
           (second_half - first_half) / first_half if first_half > 0 else 0
       )
-      if growth_ratio >= 0.15:
+      if growth_ratio >= 0.20:
         cond1_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
             f" +{round(growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
         )
 
-      # --- [조건 2] 박스권 + 20거래일 중 전일 대비 증가한 날이 10일 이상 ---
+      # --- [조건 2] 박스권 + 20거래일 중 전일 대비 증가한 날이 13일 이상 ---
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
-      if inc_days_count >= 10:
+      if inc_days_count >= 13:
         cond2_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 증가일수:"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 증가일수:"
             f" {inc_days_count}/20일\n  - 📊 {inst_str}"
         )
 
@@ -144,54 +150,48 @@ def run_stock_check():
       if is_spike:
         cond3_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 폭발:"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 폭발:"
             f" 평균 대비 {round(max_val / avg_val, 1)}배\n  - 📊 {inst_str}"
         )
 
     except Exception:
       pass
 
-  # 텔레그램 메시지 구성
-  msg_parts = [
-      f"📊 *[박스권 20% + 조건별 수급/거래대금 리포트]* ({now_str})\n"
-  ]
-  msg_parts.append(
-      f"💡 *수급 데이터 출처*: `pykrx` (KRX 공식 기관 순매수 연동)\n"
-      f"💡 *거래 지표*: 거래대금 우선 적용 (없을 시 거래량)\n"
-  )
+  # 조건별 메시지 전송
+  msg_intro = f"📊 *[박스권 20% + 수급/거래대금 스크리닝 리포트]* ({now_str})\n💡 수급 출처: `pykrx`"
+  send_telegram_message(msg_intro)
 
-  msg_parts.append(
-      f"📦 *[조건 1] 박스권(20%) + 후반부 10일 평균 거래대금 15% 이상 증가*\n"
+  msg_cond1 = (
+      f"📦 *[조건 1] 박스권(20%) + 후반부 10일 평균 거래대금 20% 이상 증가*\n\n"
       + (
-          "\n".join(cond1_results)
+          "\n\n".join(cond1_results)
           if cond1_results
           else "조건을 만족하는 종목이 없습니다."
       )
-      + "\n"
   )
+  send_telegram_message(msg_cond1)
 
-  msg_parts.append(
-      f"📈 *[조건 2] 박스권(20%) + 거래대금 증가일 10일 이상*\n"
+  msg_cond2 = (
+      f"📈 *[조건 2] 박스권(20%) + 거래대금 증가일 13일 이상*\n\n"
       + (
-          "\n".join(cond2_results)
+          "\n\n".join(cond2_results)
           if cond2_results
           else "조건을 만족하는 종목이 없습니다."
       )
-      + "\n"
   )
+  send_telegram_message(msg_cond2)
 
-  msg_parts.append(
-      f"⚡ *[조건 3] 박스권(20%) + 평균 거래대금 2배 이상 폭발 (1회 이상)*\n"
+  msg_cond3 = (
+      f"⚡ *[조건 3] 박스권(20%) + 평균 거래대금 2배 이상 폭발 (1회 이상)*\n\n"
       + (
-          "\n".join(cond3_results)
+          "\n\n".join(cond3_results)
           if cond3_results
           else "조건을 만족하는 종목이 없습니다."
       )
   )
+  send_telegram_message(msg_cond3)
 
-  final_msg = "\n".join(msg_parts)
-  print(final_msg)
-  send_telegram_message(final_msg)
+  print("모든 리포트 전송 완료!")
   print("==================================================")
 
 
