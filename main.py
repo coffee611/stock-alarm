@@ -31,7 +31,7 @@ def run_stock_check():
       high_max = df["High"].max()
       low_min = df["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.30
+      is_box = price_range_ratio <= 0.50
 
       vol_first = df["Volume"].iloc[:5].mean()
       vol_second = df["Volume"].iloc[5:].mean()
