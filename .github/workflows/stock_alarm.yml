@@ -18,10 +18,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11'   # 파이썬 버전을 3.11로 상향 조정
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pandas FinanceDataReader requests
 
       - name: Run script
