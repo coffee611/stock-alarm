@@ -1,7 +1,6 @@
 import datetime
 import os
 import FinanceDataReader as fdr
-from pykrx import stock
 import requests
 
 # 깃허브 시크릿에서 텔레그램 토큰 및 챗 ID 가져오기
@@ -43,7 +42,7 @@ def send_telegram_message(message):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [박스권 18% + 수급 및 거래량 스크리닝] 실행: {now_str}")
+  print(f" [박스권 18% + 거래량 집중 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -61,23 +60,6 @@ def run_stock_check():
 
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=35)
-  start_str = start_date_dt.strftime("%Y%m%d")
-  end_str = end_date_dt.strftime("%Y%m%d")
-
-  # pykrx 로그인 에러 원천 차단을 위한 개별 종목 순매수 조회 방식 적용 (안전망)
-  inst_net_dict = {}
-  print(
-      "기관 순매수 데이터 수집 중 (pykrx 개별 조회 및 예외 방어 적용)..."
-  )
-  for ticker in tickers[:50]:  # 부하 및 차단 방지를 위해 상위 50개 우선 수집
-    try:
-      df_net = stock.get_market_net_purchases_of_equities_by_ticker(
-          start_str, end_str, ticker
-      )
-      if not df_net.empty and "기관합계" in df_net.columns:
-        inst_net_dict[ticker] = df_net["기관합계"].sum()
-    except Exception:
-      pass
 
   cond1_results = []
   cond2_results = []
@@ -118,9 +100,6 @@ def run_stock_check():
       else:
         continue
 
-      inst_net_buy = inst_net_dict.get(ticker, 0)
-      inst_str = f"기관 누적 순매수: {inst_net_buy:,}주"
-
       # --- [조건 1] 박스권(18%) + 후반부 10일 평균 거래량이 전반부 10일 평균보다 20% 이상 증가 ---
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
@@ -131,7 +110,7 @@ def run_stock_check():
         cond1_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
             f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
-            f" +{round(growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
+            f" +{round(growth_ratio*100, 1)}%"
         )
 
       # --- [조건 2] 박스권(18%) + 20거래일 중 전일 대비 증가한 날이 12일 이상 ---
@@ -141,7 +120,7 @@ def run_stock_check():
         cond2_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
             f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일수:"
-            f" {inc_days_count}/20일\n  - 📊 {inst_str}"
+            f" {inc_days_count}/20일"
         )
 
       # --- [조건 3] 박스권(18%) + 20일 평균 거래량 대비 2배 이상 터진 날이 1회 이상 존재 ---
@@ -152,14 +131,14 @@ def run_stock_check():
         cond3_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
             f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
-            f" 평균 대비 {round(max_val / avg_val, 1)}배\n  - 📊 {inst_str}"
+            f" 평균 대비 {round(max_val / avg_val, 1)}배"
         )
 
     except Exception:
       pass
 
   # 조건별 메시지 독립 전송
-  msg_intro = f"📊 *[박스권 18% + 수급/거래량 스크리닝 리포트]* ({now_str})\n💡 수급 출처: `pykrx` (기관 순매수)\n💡 지표 우선순위: 거래량 우선 (미흡 시 거래대금)"
+  msg_intro = f"📊 *[박스권 18% + 거래량 스크리닝 리포트]* ({now_str})\n💡 적용 지표: 거래량 우선 (미흡 시 거래대금)"
   send_telegram_message(msg_intro)
 
   msg_cond1 = (
