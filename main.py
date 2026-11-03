@@ -35,7 +35,7 @@ def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
   print(
-      f" [기관 수급 + 20일 박스권 + 거래량(급증/꾸준함) 스크리닝 Bot] 실행 시각:"
+      f" [20일 박스권 + 거래량 40%↑ + 꾸준함(10일+) 스크리닝 Bot] 실행 시각:"
       f" {now_str}"
   )
   print("==================================================")
@@ -67,31 +67,41 @@ def run_stock_check():
       # 최근 20거래일 데이터 추출
       df_recent = df.tail(20)
 
-      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 20% 이내)
+      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 15% 이내)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.2
+      is_box = price_range_ratio <= 0.15
 
-      # 거래량 우선 사용, 없으면 거래대금 사용
+      # 거래대금 우선 사용, 없으면 거래량 사용
       if "Amount" in df_recent.columns:
         target_series = df_recent["Amount"]
       else:
         target_series = df_recent["Volume"]
 
-      # 2. 거래량(대금) 분석 조건 (급증 OR 꾸준함 모두 수용)
-      # 조건 A (꾸준한 증가): 20거래일 중 전일 대비 증가한 날이 12일 이상
+      # 2. 전반부(앞 10일) vs 후반부(뒤 10일) 평균 거래량 비교 조건 (40% 이상 증가)
+      first_half = target_series.head(10).mean()
+      second_half = target_series.tail(10).mean()
+
+      if first_half > 0:
+        vol_growth_ratio = (second_half - first_half) / first_half
+      else:
+        vol_growth_ratio = 0
+
+      is_volume_expanded = vol_growth_ratio >= 0.40
+
+      # 3. 꾸준한 수급 조건 (20거래일 중 10일 이상 전일 대비 증가) - 수정됨
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
-      is_steady_accumulating = inc_days_count >= 12
+      is_steady_accumulating = inc_days_count >= 10
 
-      # 조건 B (급격한 폭발): 20일 평균 거래량 대비 2.5배 이상 터진 날이 1회 이상 존재
+      # 4. 거래량 급증 조건 (20일 평균 대비 2.5배 이상 폭발 1회 이상)
       avg_vol = target_series.mean()
       max_vol = target_series.max()
       is_spike = avg_vol > 0 and (max_vol >= avg_vol * 2.5)
 
-      # 박스권이면서 [꾸준한 수급 유입] 또는 [강한 거래량 폭발] 중 하나를 만족하면 통과
-      if is_box and (is_steady_accumulating or is_spike):
+      # 최종 필터링: 박스권 + [후반부 거래량 40% 이상 증가] + (꾸준한 수급 10일+ OR 거래량 급증)
+      if is_box and is_volume_expanded and (is_steady_accumulating or is_spike):
         latest_price = df_recent["Close"].iloc[-1]
         stock_row = df_krx[df_krx["Code"] == ticker]
         stock_name = (
@@ -99,14 +109,17 @@ def run_stock_check():
         )
 
         pattern_type = (
-            "🔥 거래량 급증 포착" if is_spike else "📈 꾸준한 수급 유입"
+            "🔥 거래량 폭발 + 후반부 집중"
+            if is_spike
+            else "📈 꾸준한 수급 유입 (10일+)"
         )
 
         results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 유형: {pattern_type}\n -"
             f" 현재가: {latest_price:,}원\n  - 20일 변동폭:"
             f" {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일:"
-            f" {inc_days_count}/20일"
+            f" {inc_days_count}/20일 (후반부 성장이율:"
+            f" +{round(vol_growth_ratio*100, 1)}%)"
         )
     except Exception:
       pass
@@ -114,10 +127,10 @@ def run_stock_check():
   # 결과 처리 및 텔레그램 전송
   if results:
     msg = (
-        f"🚨 *[20일 박스권 + 수급 집중 알림]* ({now_str})\n\n"
+        f"🚨 *[핵심 수급 집중 포착 알림]* ({now_str})\n\n"
         + "\n".join(results)
-        + "\n\n시총 상위 200개 중 박스권 내에서 거래량이 급증했거나 꾸준히"
-        " 유입된 종목입니다."
+        + "\n\n시총 상위 200개 중 20일 박스권 + 후반부 거래량 40% 이상 증가 +"
+        " 꾸준한 수급(10일 이상) 조건을 만족하는 종목입니다."
     )
     print("\n" + "\n".join(results))
   else:
