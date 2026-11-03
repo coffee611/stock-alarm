@@ -1,6 +1,7 @@
 import datetime
 import os
 import FinanceDataReader as fdr
+from pykrx import stock
 import requests
 
 # 깃허브 시크릿에서 텔레그램 토큰 및 챗 ID 가져오기
@@ -34,10 +35,7 @@ def send_telegram_message(message):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(
-      f" [20일 박스권 + 거래량 40%↑ + 꾸준함(10일+) 스크리닝 Bot] 실행 시각:"
-      f" {now_str}"
-  )
+  print(f" [박스권 + 3가지 조건별 분류 및 pykrx 수급 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -53,25 +51,57 @@ def run_stock_check():
     print(f"종목 리스트 불러오기 오류: {e}")
     tickers = ["005930", "000660", "035420", "035720", "051910"]
 
-  results = []
+  # pykrx를 통한 기관 순매수 데이터 가져오기 (출처: pykrx 라이브러리)
+  end_date_dt = datetime.datetime.now()
+  start_date_dt = end_date_dt - datetime.timedelta(days=35)
+  start_str = start_date_dt.strftime("%Y%m%d")
+  end_str = end_date_dt.strftime("%Y%m%d")
+
+  inst_net_dict = {}
+  try:
+    df_kospi_inst = stock.get_market_net_purchases_of_equities_by_ticker(
+        start_str, end_str, "KOSPI"
+    )
+    df_kosdaq_inst = stock.get_market_net_purchases_of_equities_by_ticker(
+        start_str, end_str, "KOSDAQ"
+    )
+    for df_inst in [df_kospi_inst, df_kosdaq_inst]:
+      if not df_inst.empty and "기관합계" in df_inst.columns:
+        for ticker, row in df_inst.iterrows():
+          inst_net_dict[ticker] = row["기관합계"]
+  except Exception as e:
+    print(f"pykrx 기관 순매수 데이터 로드 중 오류 발생: {e}")
+
+  cond1_results = []  # 조건 1: 박스권 + 후반부 거래량 30%↑
+  cond2_results = []  # 조건 2: 박스권 + 거래량 증가일 10일 이상
+  cond3_results = []  # 조건 3: 박스권 + 2.5배 이상 거래량 폭발 1회 이상
 
   for ticker in tickers:
     try:
-      end_date = datetime.datetime.now()
-      start_date = end_date - datetime.timedelta(days=45)
-      df = fdr.DataReader(ticker, start_date, end_date)
-
+      df = fdr.DataReader(
+          ticker,
+          start_date_dt.strftime("%Y-%m-%d"),
+          end_date_dt.strftime("%Y-%m-%d"),
+      )
       if len(df) < 20:
         continue
 
-      # 최근 20거래일 데이터 추출
       df_recent = df.tail(20)
+      latest_price = df_recent["Close"].iloc[-1]
 
-      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 15% 이내)
+      stock_row = df_krx[df_krx["Code"] == ticker]
+      stock_name = (
+          stock_row["Name"].values[0] if not stock_row.empty else ticker
+      )
+
+      # 공통 전제 조건: 20거래일 박스권 (15% 이내)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
       is_box = price_range_ratio <= 0.15
+
+      if not is_box:
+        continue
 
       # 거래대금 우선 사용, 없으면 거래량 사용
       if "Amount" in df_recent.columns:
@@ -79,69 +109,86 @@ def run_stock_check():
       else:
         target_series = df_recent["Volume"]
 
-      # 2. 전반부(앞 10일) vs 후반부(뒤 10일) 평균 거래량 비교 조건 (30% 이상 증가)
+      inst_net_buy = inst_net_dict.get(ticker, 0)
+      inst_str = f"기관 누적 순매수: {inst_net_buy:,\}주(원)"
+
+      # --- [조건 1] 박스권 + 후반부 10일 평균 거래량이 전반부 10일 평균보다 30% 이상 증가 ---
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
+      vol_growth_ratio = (
+          (second_half - first_half) / first_half if first_half > 0 else 0
+      )
+      if vol_growth_ratio >= 0.30:
+        cond1_results.append(
+            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 거래량 증가율:"
+            f" +{round(vol_growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
+        )
 
-      if first_half > 0:
-        vol_growth_ratio = (second_half - first_half) / first_half
-      else:
-        vol_growth_ratio = 0
-
-      is_volume_expanded = vol_growth_ratio >= 0.40
-
-      # 3. 꾸준한 수급 조건 (20거래일 중 10일 이상 전일 대비 증가) 
+      # --- [조건 2] 박스권 + 20거래일 중 전일 대비 거래량 증가한 날이 10일 이상 ---
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
-      is_steady_accumulating = inc_days_count >= 10
+      if inc_days_count >= 10:
+        cond2_results.append(
+            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일:"
+            f" {inc_days_count}/20일\n  - 📊 {inst_str}"
+        )
 
-      # 4. 거래량 급증 조건 (20일 평균 대비 2.5배 이상 폭발 1회 이상)
+      # --- [조건 3] 박스권 + 20일 평균 거래량 대비 2.5배 이상 터진 날이 1회 이상 존재 ---
       avg_vol = target_series.mean()
       max_vol = target_series.max()
       is_spike = avg_vol > 0 and (max_vol >= avg_vol * 2.5)
-
-      # 최종 필터링: 박스권 + [후반부 거래량 40% 이상 증가] + (꾸준한 수급 10일+ OR 거래량 급증)
-      if is_box and is_volume_expanded and (is_steady_accumulating or is_spike):
-        latest_price = df_recent["Close"].iloc[-1]
-        stock_row = df_krx[df_krx["Code"] == ticker]
-        stock_name = (
-            stock_row["Name"].values[0] if not stock_row.empty else ticker
+      if is_spike:
+        cond3_results.append(
+            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
+            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
+            f" 평균 대비 {round(max_vol / avg_vol, 1)}배\n  - 📊 {inst_str}"
         )
 
-        pattern_type = (
-            "🔥 거래량 폭발 + 후반부 집중"
-            if is_spike
-            else "📈 꾸준한 수급 유입 (10일+)"
-        )
-
-        results.append(
-            f"• *{stock_name}* (`{ticker}`)\n  - 유형: {pattern_type}\n -"
-            f" 현재가: {latest_price:,}원\n  - 20일 변동폭:"
-            f" {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일:"
-            f" {inc_days_count}/20일 (후반부 성장이율:"
-            f" +{round(vol_growth_ratio*100, 1)}%)"
-        )
     except Exception:
       pass
 
-  # 결과 처리 및 텔레그램 전송
-  if results:
-    msg = (
-        f"🚨 *[핵심 수급 집중 포착 알림]* ({now_str})\n\n"
-        + "\n".join(results)
-        + "\n\n시총 상위 200개 중 20일 박스권 + 후반부 거래량 40% 이상 증가 +"
-        " 꾸준한 수급(10일 이상) 조건을 만족하는 종목입니다."
-    )
-    print("\n" + "\n".join(results))
-  else:
-    msg = (
-        f"ℹ️ *[주식 스크리닝 결과]* ({now_str})\n\n조건을 만족하는 종목이"
-        " 없습니다."
-    )
-    print("조건을 만족하는 종목이 없습니다.")
+  # 텔레그램 메시지 구성
+  msg_parts = [
+      f"📊 *[박스권 + 3가지 조건별 수급 스크리닝 리포트]* ({now_str})\n"
+  ]
+  msg_parts.append(
+      f"💡 *수급 데이터 출처*: `pykrx` (KRX 공식 기관 순매수 데이터 연동)\n"
+  )
 
-  # 스마트폰 텔레그램으로 전송
-  send_telegram_message(msg)
+  msg_parts.append(
+      f"📦 *[조건 1] 박스권 + 후반부 10일 평균 거래량 30% 이상 증가*\n"
+      + (
+          "\n".join(cond1_results)
+          if cond1_results
+          else "조건을 만족하는 종목이 없습니다."
+      )
+      + "\n"
+  )
+
+  msg_parts.append(
+      f"📈 *[조건 2] 박스권 + 거래량 증가일 10일 이상*\n"
+      + (
+          "\n".join(cond2_results)
+          if cond2_results
+          else "조건을 만족하는 종목이 없습니다."
+      )
+      + "\n"
+  )
+
+  msg_parts.append(
+      f"⚡ *[조건 3] 박스권 + 평균 거래량 2.5배 이상 폭발 (1회 이상)*\n"
+      + (
+          "\n".join(cond3_results)
+          if cond3_results
+          else "조건을 만족하는 종목이 없습니다."
+      )
+  )
+
+  final_msg = "\n".join(msg_parts)
+  print(final_msg)
+  send_telegram_message(final_msg)
   print("==================================================")
 
 
