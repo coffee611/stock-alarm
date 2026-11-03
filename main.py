@@ -35,7 +35,7 @@ def send_telegram_message(message):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [박스권 + 3가지 조건별 분류 및 pykrx 수급 스크리닝] 실행: {now_str}")
+  print(f" [박스권 20% + 수급 및 거래대금 조건별 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -72,9 +72,9 @@ def run_stock_check():
   except Exception as e:
     print(f"pykrx 기관 순매수 데이터 로드 중 오류 발생: {e}")
 
-  cond1_results = []  # 조건 1: 박스권 + 후반부 거래량 30%↑
-  cond2_results = []  # 조건 2: 박스권 + 거래량 증가일 10일 이상
-  cond3_results = []  # 조건 3: 박스권 + 2.5배 이상 거래량 폭발 1회 이상
+  cond1_results = []  # 조건 1: 박스권(20%) + 후반부 거래대금/량 15%↑
+  cond2_results = []  # 조건 2: 박스권(20%) + 증가일 10일 이상
+  cond3_results = []  # 조건 3: 박스권(20%) + 2배 이상 폭발 1회 이상
 
   for ticker in tickers:
     try:
@@ -94,56 +94,58 @@ def run_stock_check():
           stock_row["Name"].values[0] if not stock_row.empty else ticker
       )
 
-      # 공통 전제 조건: 20거래일 박스권 (15% 이내)
+      # 1. 공통 전제 조건: 20거래일 박스권 범위 20% 이내
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.15
+      is_box = price_range_ratio <= 0.20
 
       if not is_box:
         continue
 
-      # 거래대금 우선 사용, 없으면 거래량 사용
+      # 2. 거래대금 우선 고려 (없으면 거래량 사용)
       if "Amount" in df_recent.columns:
         target_series = df_recent["Amount"]
+        unit_str = "원"
       else:
         target_series = df_recent["Volume"]
+        unit_str = "주"
 
       inst_net_buy = inst_net_dict.get(ticker, 0)
-      inst_str = f"기관 누적 순매수: {inst_net_buy:,\}주(원)"
+      inst_str = f"기관 누적 순매수: {inst_net_buy:,}주(원)"
 
-      # --- [조건 1] 박스권 + 후반부 10일 평균 거래량이 전반부 10일 평균보다 30% 이상 증가 ---
+      # --- [조건 1] 박스권 + 후반부 10일 평균이 전반부 10일 평균보다 15% 이상 증가 ---
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
-      vol_growth_ratio = (
+      growth_ratio = (
           (second_half - first_half) / first_half if first_half > 0 else 0
       )
-      if vol_growth_ratio >= 0.30:
+      if growth_ratio >= 0.15:
         cond1_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 거래량 증가율:"
-            f" +{round(vol_growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
+            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
+            f" +{round(growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
         )
 
-      # --- [조건 2] 박스권 + 20거래일 중 전일 대비 거래량 증가한 날이 10일 이상 ---
+      # --- [조건 2] 박스권 + 20거래일 중 전일 대비 증가한 날이 10일 이상 ---
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
       if inc_days_count >= 10:
         cond2_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일:"
+            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 증가일수:"
             f" {inc_days_count}/20일\n  - 📊 {inst_str}"
         )
 
-      # --- [조건 3] 박스권 + 20일 평균 거래량 대비 2.5배 이상 터진 날이 1회 이상 존재 ---
-      avg_vol = target_series.mean()
-      max_vol = target_series.max()
-      is_spike = avg_vol > 0 and (max_vol >= avg_vol * 2.5)
+      # --- [조건 3] 박스권 + 20일 평균 대비 2배 이상 터진 날이 1회 이상 존재 ---
+      avg_val = target_series.mean()
+      max_val = target_series.max()
+      is_spike = avg_val > 0 and (max_val >= avg_val * 2.0)
       if is_spike:
         cond3_results.append(
             f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
-            f" 평균 대비 {round(max_vol / avg_vol, 1)}배\n  - 📊 {inst_str}"
+            f" 20일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 폭발:"
+            f" 평균 대비 {round(max_val / avg_val, 1)}배\n  - 📊 {inst_str}"
         )
 
     except Exception:
@@ -151,14 +153,15 @@ def run_stock_check():
 
   # 텔레그램 메시지 구성
   msg_parts = [
-      f"📊 *[박스권 + 3가지 조건별 수급 스크리닝 리포트]* ({now_str})\n"
+      f"📊 *[박스권 20% + 조건별 수급/거래대금 리포트]* ({now_str})\n"
   ]
   msg_parts.append(
-      f"💡 *수급 데이터 출처*: `pykrx` (KRX 공식 기관 순매수 데이터 연동)\n"
+      f"💡 *수급 데이터 출처*: `pykrx` (KRX 공식 기관 순매수 연동)\n"
+      f"💡 *거래 지표*: 거래대금 우선 적용 (없을 시 거래량)\n"
   )
 
   msg_parts.append(
-      f"📦 *[조건 1] 박스권 + 후반부 10일 평균 거래량 30% 이상 증가*\n"
+      f"📦 *[조건 1] 박스권(20%) + 후반부 10일 평균 거래대금 15% 이상 증가*\n"
       + (
           "\n".join(cond1_results)
           if cond1_results
@@ -168,7 +171,7 @@ def run_stock_check():
   )
 
   msg_parts.append(
-      f"📈 *[조건 2] 박스권 + 거래량 증가일 10일 이상*\n"
+      f"📈 *[조건 2] 박스권(20%) + 거래대금 증가일 10일 이상*\n"
       + (
           "\n".join(cond2_results)
           if cond2_results
@@ -178,7 +181,7 @@ def run_stock_check():
   )
 
   msg_parts.append(
-      f"⚡ *[조건 3] 박스권 + 평균 거래량 2.5배 이상 폭발 (1회 이상)*\n"
+      f"⚡ *[조건 3] 박스권(20%) + 평균 거래대금 2배 이상 폭발 (1회 이상)*\n"
       + (
           "\n".join(cond3_results)
           if cond3_results
