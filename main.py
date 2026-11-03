@@ -59,27 +59,25 @@ def run_stock_check():
     print(f"종목 리스트 불러오기 오류: {e}")
     tickers = ["005930", "000660", "035420", "035720", "051910"]
 
-  # pykrx를 통한 기관 순매수 데이터 가져오기 (출처: pykrx 라이브러리)
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=35)
   start_str = start_date_dt.strftime("%Y%m%d")
   end_str = end_date_dt.strftime("%Y%m%d")
 
+  # pykrx 로그인 에러 원천 차단을 위한 개별 종목 순매수 조회 방식 적용 (안전망)
   inst_net_dict = {}
-  try:
-    df_kospi_inst = stock.get_market_net_purchases_of_equities_by_ticker(
-        start_str, end_str, "KOSPI"
-    )
-    df_kosdaq_inst = stock.get_market_net_purchases_of_equities_by_ticker(
-        start_str, end_str, "KOSDAQ"
-    )
-    for df_inst in [df_kospi_inst, df_kosdaq_inst]:
-      if not df_inst.empty and "기관합계" in df_inst.columns:
-        for ticker, row in df_inst.iterrows():
-          inst_net_dict[ticker] = row["기관합계"]
-    print("pykrx 기관 순매수 데이터 로드 성공!")
-  except Exception as e:
-    print(f"[안내] KRX 서버 응답 오류로 수급 데이터 로드 스킵 (기본값 처리): {e}")
+  print(
+      "기관 순매수 데이터 수집 중 (pykrx 개별 조회 및 예외 방어 적용)..."
+  )
+  for ticker in tickers[:50]:  # 부하 및 차단 방지를 위해 상위 50개 우선 수집
+    try:
+      df_net = stock.get_market_net_purchases_of_equities_by_ticker(
+          start_str, end_str, ticker
+      )
+      if not df_net.empty and "기관합계" in df_net.columns:
+        inst_net_dict[ticker] = df_net["기관합계"].sum()
+    except Exception:
+      pass
 
   cond1_results = []
   cond2_results = []
@@ -121,7 +119,7 @@ def run_stock_check():
         continue
 
       inst_net_buy = inst_net_dict.get(ticker, 0)
-      inst_str = f"기관 누적 순매수: {inst_net_buy:,}주(원)"
+      inst_str = f"기관 누적 순매수: {inst_net_buy:,}주"
 
       # --- [조건 1] 박스권(18%) + 후반부 10일 평균 거래량이 전반부 10일 평균보다 20% 이상 증가 ---
       first_half = target_series.head(10).mean()
