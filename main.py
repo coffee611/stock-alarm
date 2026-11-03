@@ -67,11 +67,11 @@ def run_stock_check():
       # 최근 20거래일 데이터 추출
       df_recent = df.tail(20)
 
-      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 15% 이내)
+      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 20% 이내)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.15
+      is_box = price_range_ratio <= 0.2
 
       # 거래량 우선 사용, 없으면 거래대금 사용
       if "Amount" in df_recent.columns:
@@ -80,10 +80,10 @@ def run_stock_check():
         target_series = df_recent["Volume"]
 
       # 2. 거래량(대금) 분석 조건 (급증 OR 꾸준함 모두 수용)
-      # 조건 A (꾸준한 증가): 20거래일 중 전일 대비 증가한 날이 15일 이상
+      # 조건 A (꾸준한 증가): 20거래일 중 전일 대비 증가한 날이 12일 이상
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
-      is_steady_accumulating = inc_days_count >= 15
+      is_steady_accumulating = inc_days_count >= 12
 
       # 조건 B (급격한 폭발): 20일 평균 거래량 대비 2.5배 이상 터진 날이 1회 이상 존재
       avg_vol = target_series.mean()
