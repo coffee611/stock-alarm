@@ -34,7 +34,10 @@ def send_telegram_message(message):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [기관 수급 + 박스권 스크리닝 Bot] 실행 시각: {now_str}")
+  print(
+      f" [기관 수급 + 20일 박스권 + 거래량(급증/꾸준함) 스크리닝 Bot] 실행 시각:"
+      f" {now_str}"
+  )
   print("==================================================")
 
   try:
@@ -55,32 +58,55 @@ def run_stock_check():
   for ticker in tickers:
     try:
       end_date = datetime.datetime.now()
-      start_date = end_date - datetime.timedelta(days=25)
+      start_date = end_date - datetime.timedelta(days=45)
       df = fdr.DataReader(ticker, start_date, end_date)
 
-      if len(df) < 10:
+      if len(df) < 20:
         continue
 
-      df_recent = df.tail(10)
+      # 최근 20거래일 데이터 추출
+      df_recent = df.tail(20)
+
+      # 1. 박스권 조건 (20거래일 기준 최고가-최저가 변동폭 15% 이내)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       price_range_ratio = (high_max - low_min) / low_min
       is_box = price_range_ratio <= 0.15
 
-      vol_first = df_recent["Volume"].iloc[:5].mean()
-      vol_second = df_recent["Volume"].iloc[5:].mean()
-      is_vol_inc = vol_second > vol_first
+      # 거래량 우선 사용, 없으면 거래대금 사용
+      if "Amount" in df_recent.columns:
+        target_series = df_recent["Amount"]
+      else:
+        target_series = df_recent["Volume"]
 
-      if is_box and is_vol_inc:
+      # 2. 거래량(대금) 분석 조건 (급증 OR 꾸준함 모두 수용)
+      # 조건 A (꾸준한 증가): 20거래일 중 전일 대비 증가한 날이 15일 이상
+      vol_diff = target_series.diff() > 0
+      inc_days_count = vol_diff.sum()
+      is_steady_accumulating = inc_days_count >= 15
+
+      # 조건 B (급격한 폭발): 20일 평균 거래량 대비 2.5배 이상 터진 날이 1회 이상 존재
+      avg_vol = target_series.mean()
+      max_vol = target_series.max()
+      is_spike = avg_vol > 0 and (max_vol >= avg_vol * 2.5)
+
+      # 박스권이면서 [꾸준한 수급 유입] 또는 [강한 거래량 폭발] 중 하나를 만족하면 통과
+      if is_box and (is_steady_accumulating or is_spike):
         latest_price = df_recent["Close"].iloc[-1]
         stock_row = df_krx[df_krx["Code"] == ticker]
         stock_name = (
             stock_row["Name"].values[0] if not stock_row.empty else ticker
         )
 
+        pattern_type = (
+            "🔥 거래량 급증 포착" if is_spike else "📈 꾸준한 수급 유입"
+        )
+
         results.append(
-            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n  -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%"
+            f"• *{stock_name}* (`{ticker}`)\n  - 유형: {pattern_type}\n -"
+            f" 현재가: {latest_price:,}원\n  - 20일 변동폭:"
+            f" {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일:"
+            f" {inc_days_count}/20일"
         )
     except Exception:
       pass
@@ -88,17 +114,18 @@ def run_stock_check():
   # 결과 처리 및 텔레그램 전송
   if results:
     msg = (
-        f"🚨 *[주식 포착 알림]* ({now_str})\n\n"
+        f"🚨 *[20일 박스권 + 수급 집중 알림]* ({now_str})\n\n"
         + "\n".join(results)
-        + "\n\n시총 상위 200개 중 박스권+수급 조건을 만족하는 종목입니다."
+        + "\n\n시총 상위 200개 중 박스권 내에서 거래량이 급증했거나 꾸준히"
+        " 유입된 종목입니다."
     )
     print("\n" + "\n".join(results))
   else:
     msg = (
-        f"ℹ️ *[주식 스크리닝 결과]* ({now_str})\n\n오늘 조건을 만족하는"
-        " 종목이 없습니다."
+        f"ℹ️ *[주식 스크리닝 결과]* ({now_str})\n\n조건을 만족하는 종목이"
+        " 없습니다."
     )
-    print("오늘 조건을 만족하는 종목이 없습니다.")
+    print("조건을 만족하는 종목이 없습니다.")
 
   # 스마트폰 텔레그램으로 전송
   send_telegram_message(msg)
