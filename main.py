@@ -1,4 +1,4 @@
-datetime import datetime
+import datetime
 import os
 import FinanceDataReader as fdr
 import pandas as pd
@@ -54,7 +54,6 @@ def get_naver_institutional_net(ticker):
       dfs = pd.read_html(res.text)
       for df in dfs:
         cols = [str(c) for c in df.columns]
-        # '기관순매매량' 또는 '기관'이 포함된 컬럼 탐색
         inst_col_candidates = [c for c in cols if "기관" in c]
         if inst_col_candidates:
           inst_col = inst_col_candidates[0]
@@ -124,7 +123,6 @@ def run_stock_check():
 
       # 1. 공통 전제 조건: 20거래일 박스권 범위 18% 이내 (0 나누기 방지)
       high_max = df_recent["High"].max()
-      low_min = df_recent["High"].min()  # 안전 장치
       low_min = df_recent["Low"].min()
       if low_min <= 0:
         continue
@@ -157,7 +155,7 @@ def run_stock_check():
       max_val = target_series.max()
       is_spike = avg_val > 0 and (max_val >= avg_val * 2.0)
 
-      # 어떤 조건이라도 만족할 때만 네이버 금융에서 수급(기관 순매수) 데이터 조회
+      # 어떤 조건이라도 만족할 때만 네이버 금융에서 수급 데이터 조회
       if growth_ratio >= 0.20 or inc_days_count >= 12 or is_spike:
         inst_net_buy = get_naver_institutional_net(ticker)
         inst_str = f"기관 누적 순매수: {inst_net_buy:,}주"
