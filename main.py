@@ -1,6 +1,7 @@
-import datetime
+datetime import datetime
 import os
 import FinanceDataReader as fdr
+import pandas as pd
 import requests
 
 # 깃허브 시크릿에서 텔레그램 토큰 및 챗 ID 가져오기
@@ -39,10 +40,48 @@ def send_telegram_message(message):
       print(f"텔레그램 알림 전송 실패: {response.text}")
 
 
+def get_naver_institutional_net(ticker):
+  """네이버 금융에서 해당 종목의 최근 20거래일 기관 순매매량 합계 조회"""
+  try:
+    url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        )
+    }
+    res = requests.get(url, headers=headers, timeout=5)
+    if res.status_code == 200:
+      dfs = pd.read_html(res.text)
+      for df in dfs:
+        cols = [str(c) for c in df.columns]
+        # '기관순매매량' 또는 '기관'이 포함된 컬럼 탐색
+        inst_col_candidates = [c for c in cols if "기관" in c]
+        if inst_col_candidates:
+          inst_col = inst_col_candidates[0]
+          df = df.dropna(subset=[df.columns[0]])
+          total_net = 0
+          count = 0
+          for val in df[inst_col]:
+            if count >= 20:
+              break
+            try:
+              val_str = (
+                  str(val).replace(",", "").replace("+", "").strip()
+              )
+              total_net += int(val_str)
+              count += 1
+            except:
+              pass
+          return total_net
+  except Exception:
+    pass
+  return 0
+
+
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [박스권 18% + 거래량 집중 스크리닝] 실행: {now_str}")
+  print(f" [박스권 18% + 네이버 수급/거래량 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -83,9 +122,13 @@ def run_stock_check():
           stock_row["Name"].values[0] if not stock_row.empty else ticker
       )
 
-      # 1. 공통 전제 조건: 20거래일 박스권 범위 18% 이내
+      # 1. 공통 전제 조건: 20거래일 박스권 범위 18% 이내 (0 나누기 방지)
       high_max = df_recent["High"].max()
+      low_min = df_recent["High"].min()  # 안전 장치
       low_min = df_recent["Low"].min()
+      if low_min <= 0:
+        continue
+
       price_range_ratio = (high_max - low_min) / low_min
       is_box = price_range_ratio <= 0.18
 
@@ -100,45 +143,54 @@ def run_stock_check():
       else:
         continue
 
-      # --- [조건 1] 박스권(18%) + 후반부 10일 평균 거래량이 전반부 10일 평균보다 20% 이상 증가 ---
+      # 조건 만족 여부 미리 체크
       first_half = target_series.head(10).mean()
       second_half = target_series.tail(10).mean()
       growth_ratio = (
           (second_half - first_half) / first_half if first_half > 0 else 0
       )
-      if growth_ratio >= 0.20:
-        cond1_results.append(
-            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
-            f" +{round(growth_ratio*100, 1)}%"
-        )
 
-      # --- [조건 2] 박스권(18%) + 20거래일 중 전일 대비 증가한 날이 12일 이상 ---
       vol_diff = target_series.diff() > 0
       inc_days_count = vol_diff.sum()
-      if inc_days_count >= 12:
-        cond2_results.append(
-            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일수:"
-            f" {inc_days_count}/20일"
-        )
 
-      # --- [조건 3] 박스권(18%) + 20일 평균 거래량 대비 2배 이상 터진 날이 1회 이상 존재 ---
       avg_val = target_series.mean()
       max_val = target_series.max()
       is_spike = avg_val > 0 and (max_val >= avg_val * 2.0)
-      if is_spike:
-        cond3_results.append(
-            f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n -"
-            f" 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
-            f" 평균 대비 {round(max_val / avg_val, 1)}배"
-        )
+
+      # 어떤 조건이라도 만족할 때만 네이버 금융에서 수급(기관 순매수) 데이터 조회
+      if growth_ratio >= 0.20 or inc_days_count >= 12 or is_spike:
+        inst_net_buy = get_naver_institutional_net(ticker)
+        inst_str = f"기관 누적 순매수: {inst_net_buy:,}주"
+
+        # --- [조건 1] 박스권(18%) + 후반부 10일 평균 거래량이 전반부 10일 평균보다 20% 이상 증가 ---
+        if growth_ratio >= 0.20:
+          cond1_results.append(
+              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
+              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
+              f" +{round(growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
+          )
+
+        # --- [조건 2] 박스권(18%) + 20거래일 중 전일 대비 증가한 날이 12일 이상 ---
+        if inc_days_count >= 12:
+          cond2_results.append(
+              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
+              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일수:"
+              f" {inc_days_count}/20일\n  - 📊 {inst_str}"
+          )
+
+        # --- [조건 3] 박스권(18%) + 20일 평균 거래량 대비 2배 이상 터진 날이 1회 이상 존재 ---
+        if is_spike:
+          cond3_results.append(
+              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
+              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
+              f" 평균 대비 {round(max_val / avg_val, 1)}배\n  - 📊 {inst_str}"
+          )
 
     except Exception:
       pass
 
   # 조건별 메시지 독립 전송
-  msg_intro = f"📊 *[박스권 18% + 거래량 스크리닝 리포트]* ({now_str})\n💡 적용 지표: 거래량 우선 (미흡 시 거래대금)"
+  msg_intro = f"📊 *[박스권 18% + 네이버 수급/거래량 스크리닝]* ({now_str})\n💡 수급 출처: 네이버 금융 (기관 순매매량)"
   send_telegram_message(msg_intro)
 
   msg_cond1 = (
