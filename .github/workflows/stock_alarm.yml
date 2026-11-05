@@ -2,31 +2,32 @@ name: Stock Alarm Bot
 
 on:
   schedule:
-    # 1차: 한국 시간 평일 오전 8시 00분 (UTC 기준 23시 00분)
-    # 2차: 한국 시간 평일 오후 6시 20분 (UTC 기준 09시 20분)
-    - cron: '50 23,9 * * 1-5'
-  workflow_dispatch: # Actions 탭에서 수동 실행 허용
+    # 매일 오전 7:50 (KST 기준 -> UTC 22:50)
+    - cron: '50 22 * * *'
+    # 매일 오후 6:50 (KST 기준 -> UTC 09:50)
+    - cron: '50 9 * * *'
+  workflow_dispatch: # 수동 실행(Run workflow) 버튼 활성화
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.9'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install finance-datareader pandas requests pykrx
+          pip install pandas finance-datareader requests lxml html5lib
 
-      - name: Run stock screening script
+      - name: Run stock screening bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: |
+          python main.py
