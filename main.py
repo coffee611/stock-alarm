@@ -40,8 +40,8 @@ def send_telegram_message(message):
       print(f"텔레그램 알림 전송 실패: {response.text}")
 
 
-def get_naver_institutional_net(ticker):
-  """네이버 금융에서 해당 종목의 최근 20거래일 기관 순매매량 합계 조회"""
+def get_naver_institutional_amount_5days(ticker, recent_df):
+  """네이버 금융에서 최근 5거래일 기관 순매수 금액(억원) 추정 및 분석"""
   try:
     url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
     headers = {
@@ -58,29 +58,37 @@ def get_naver_institutional_net(ticker):
         if inst_col_candidates:
           inst_col = inst_col_candidates[0]
           df = df.dropna(subset=[df.columns[0]])
-          total_net = 0
-          count = 0
-          for val in df[inst_col]:
-            if count >= 20:
-              break
+          if len(df) < 5:
+            continue
+
+          amounts = []
+          for i in range(5):
+            row_val = df.iloc[i][inst_col]
+            close_price = recent_df["Close"].iloc[-(5 - i)]
             try:
-              val_str = (
-                  str(val).replace(",", "").replace("+", "").strip()
-              )
-              total_net += int(val_str)
-              count += 1
+              val_str = str(row_val).replace(",", "").strip()
+              shares = int(val_str[1:]) if val_str.startswith("+") else int(val_str)
+              amount_억 = (shares * close_price) / 100_000_000
+              amounts.append(amount_억)
             except:
-              pass
-          return total_net
+              amounts.append(0.0)
+
+          if not amounts:
+            return 0.0, 0.0, 0, []
+
+          today_amount = amounts[0]
+          positive_days = sum(1 for a in amounts if a > 0)
+
+          return today_amount, sum(amounts), positive_days, amounts
   except Exception:
     pass
-  return 0
+  return 0.0, 0.0, 0, []
 
 
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [박스권 18% + 네이버 수급/거래량 스크리닝] 실행: {now_str}")
+  print(f" [단기 5일 박스권(20%) + 큰형님 수급 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   try:
@@ -97,7 +105,7 @@ def run_stock_check():
     tickers = ["005930", "000660", "035420", "035720", "051910"]
 
   end_date_dt = datetime.datetime.now()
-  start_date_dt = end_date_dt - datetime.timedelta(days=35)
+  start_date_dt = end_date_dt - datetime.timedelta(days=20)
 
   cond1_results = []
   cond2_results = []
@@ -110,10 +118,10 @@ def run_stock_check():
           start_date_dt.strftime("%Y-%m-%d"),
           end_date_dt.strftime("%Y-%m-%d"),
       )
-      if len(df) < 20:
+      if len(df) < 5:
         continue
 
-      df_recent = df.tail(20)
+      df_recent = df.tail(5)
       latest_price = df_recent["Close"].iloc[-1]
 
       stock_row = df_krx[df_krx["Code"] == ticker]
@@ -121,78 +129,86 @@ def run_stock_check():
           stock_row["Name"].values[0] if not stock_row.empty else ticker
       )
 
-      # 1. 공통 전제 조건: 20거래일 박스권 범위 18% 이내 (0 나누기 방지)
+      # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 20% 이내 (수정됨)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       if low_min <= 0:
         continue
 
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.18
+      is_box = price_range_ratio <= 0.20
 
       if not is_box:
         continue
 
-      # 2. 거래량 우선 적용, 미흡/없을 시 거래대금 적용
-      if "Volume" in df_recent.columns and df_recent["Volume"].sum() > 0:
-        target_series = df_recent["Volume"]
-      elif "Amount" in df_recent.columns:
-        target_series = df_recent["Amount"]
-      else:
+      today_amt, total_amt_5d, positive_days, daily_amounts = (
+          get_naver_institutional_amount_5days(ticker, df_recent)
+      )
+      if not daily_amounts or len(daily_amounts) < 5:
         continue
 
-      # 조건 만족 여부 미리 체크
-      first_half = target_series.head(10).mean()
-      second_half = target_series.tail(10).mean()
+      # 5일 데이터 분할 (전반 2일 vs 후반 3일)
+      first_half_avg = sum(daily_amounts[:2]) / 2.0
+      second_half_avg = sum(daily_amounts[2:]) / 3.0
       growth_ratio = (
-          (second_half - first_half) / first_half if first_half > 0 else 0
+          (second_half_avg - first_half_avg) / abs(first_half_avg)
+          if first_half_avg != 0
+          else 0
       )
 
-      vol_diff = target_series.diff() > 0
-      inc_days_count = vol_diff.sum()
+      mean_amt = sum(daily_amounts) / 5.0
+      spike_count = sum(
+          1 for a in daily_amounts if mean_amt > 0 and a >= mean_amt * 2.0
+      )
 
-      avg_val = target_series.mean()
-      max_val = target_series.max()
-      is_spike = avg_val > 0 and (max_val >= avg_val * 2.0)
+      # 사용자 요청 반영된 완화된 조건 매칭 검증
+      is_cond1 = growth_ratio >= 0.20  # 조건 1: 후반부 20% 이상 증가 (수정됨)
+      is_cond2 = positive_days >= 3  # 조건 2: 5일 중 3일 이상 순매수 유입 (수정됨)
+      is_cond3 = spike_count >= 2  # 조건 3: 평균 대비 2배 폭발 2회 이상 (수정됨)
 
-      # 어떤 조건이라도 만족할 때만 네이버 금융에서 수급 데이터 조회
-      if growth_ratio >= 0.20 or inc_days_count >= 12 or is_spike:
-        inst_net_buy = get_naver_institutional_net(ticker)
-        inst_str = f"기관 누적 순매수: {inst_net_buy:,}주"
+      if is_cond1 or is_cond2 or is_cond3:
+        today_mark = (
+            "🔥 당일 순매수 유입" if today_amt > 0 else "💤 당일 관망/매도"
+        )
+        inst_str = (
+            f"기관 순매수 금액: 5일 누적 +{round(total_amt_5d, 1)}억"
+            f" ({positive_days}/5일 유입)\n  - 당일 추정: +{round(today_amt, 1)}억"
+            f" [{today_mark}]"
+        )
 
-        # --- [조건 1] 박스권(18%) + 후반부 10일 평균 거래량이 전반부 10일 평균보다 20% 이상 증가 ---
-        if growth_ratio >= 0.20:
+        # --- [조건 1] 5일 박스권(20%) + 후반부 순매수 금액 20% 이상 증가 ---
+        if is_cond1:
           cond1_results.append(
               f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 증가율:"
-              f" +{round(growth_ratio*100, 1)}%\n  - 📊 {inst_str}"
+              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 금액"
+              f" 증가율: +{round(growth_ratio*100, 1)}%\n  - 💰 {inst_str}"
           )
 
-        # --- [조건 2] 박스권(18%) + 20거래일 중 전일 대비 증가한 날이 12일 이상 ---
-        if inc_days_count >= 12:
+        # --- [조건 2] 5일 박스권(20%) + 3일 이상 순매수 유입 ---
+        if is_cond2:
           cond2_results.append(
               f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 거래량 증가일수:"
-              f" {inc_days_count}/20일\n  - 📊 {inst_str}"
+              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 순매수 유입"
+              f" 일수: {positive_days}/5일\n  - 💰 {inst_str}"
           )
 
-        # --- [조건 3] 박스권(18%) + 20일 평균 거래량 대비 2배 이상 터진 날이 1회 이상 존재 ---
-        if is_spike:
+        # --- [조건 3] 5일 박스권(20%) + 평균 순매수 금액 2배 폭발 2회 이상 ---
+        if is_cond3:
           cond3_results.append(
               f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 변동폭: {round(price_range_ratio*100, 1)}%\n  - 최대 거래량 폭발:"
-              f" 평균 대비 {round(max_val / avg_val, 1)}배\n  - 📊 {inst_str}"
+              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 2배 폭발 횟수:"
+              f" {spike_count}회\n  - 💰 {inst_str}"
           )
 
     except Exception:
       pass
 
   # 조건별 메시지 독립 전송
-  msg_intro = f"📊 *[박스권 18% + 네이버 수급/거래량 스크리닝]* ({now_str})\n💡 수급 출처: 네이버 금융 (기관 순매매량)"
+  msg_intro = f"📊 *[단기 5일 박스권(20%) + 큰형님 순매수 금액 리포트]* ({now_str})\n💡 단기 집중 전략: 최근 5거래일 기관 자금 집중도 및 폭발 강도 분석"
   send_telegram_message(msg_intro)
 
   msg_cond1 = (
-      f"📦 *[조건 1] 박스권(18%) + 후반부 10일 평균 거래량 20% 이상 증가*\n\n"
+      f"📦 *[조건 1] 5일 박스권(20%) + 후반부 순매수 금액 20% 이상 증가*\n\n"
       + (
           "\n\n".join(cond1_results)
           if cond1_results
@@ -202,7 +218,7 @@ def run_stock_check():
   send_telegram_message(msg_cond1)
 
   msg_cond2 = (
-      f"📈 *[조건 2] 박스권(18%) + 거래량 증가일 12일 이상*\n\n"
+      f"📈 *[조건 2] 5일 박스권(20%) + 3일 이상 순매수 유입*\n\n"
       + (
           "\n\n".join(cond2_results)
           if cond2_results
@@ -212,7 +228,7 @@ def run_stock_check():
   send_telegram_message(msg_cond2)
 
   msg_cond3 = (
-      f"⚡ *[조건 3] 박스권(18%) + 평균 거래량 2배 이상 폭발 (1회 이상)*\n\n"
+      f"⚡ *[조건 3] 5일 박스권(20%) + 평균 순매수 금액 2배 폭발 2회 이상*\n\n"
       + (
           "\n\n".join(cond3_results)
           if cond3_results
