@@ -40,6 +40,48 @@ def send_telegram_message(message):
       print(f"텔레그램 알림 전송 실패: {response.text}")
 
 
+def get_target_stocks():
+  """코스피, 코스닥 각 시총 상위 400개 추출 (ETF, ETN, 스팩, 리츠 등 제외 / 우선주 허용)"""
+  exclude_keywords = [
+      "ETF",
+      "ETN",
+      "스팩",
+      "SPAC",
+      "리츠",
+      "KODEX",
+      "TIGER",
+      "ARIRANG",
+      "KBSTAR",
+      "SOL",
+      "HANARO",
+      "KOSEF",
+      "PLUS",
+      "TIMEFOLIO",
+      "RISE",
+      "WOORI",
+      "BNK",
+      "히어로즈",
+  ]
+  target_dfs = []
+
+  for market in ["KOSPI", "KOSDAQ"]:
+    try:
+      df = fdr.StockListing(market)
+      if "Name" in df.columns:
+        for kw in exclude_keywords:
+          df = df[~df["Name"].str.contains(kw, na=False)]
+      if "MarCap" in df.columns:
+        df = df.sort_values(by="MarCap", ascending=False)
+      target_dfs.append(df.head(400))
+    except Exception as e:
+      print(f"{market} 종목 리스트 로드 오류: {e}")
+
+  if target_dfs:
+    combined_df = pd.concat(target_dfs, ignore_index=True)
+    return combined_df
+  return pd.DataFrame()
+
+
 def get_naver_institutional_amount_5days(ticker, recent_df):
   """네이버 금융에서 최근 5거래일 기관 순매수 금액(억원) 추정 및 분석"""
   try:
@@ -88,30 +130,31 @@ def get_naver_institutional_amount_5days(ticker, recent_df):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [단기 5일 박스권(20%) + 큰형님 수급 스크리닝] 실행: {now_str}")
+  print(
+      f" [단기 5일 박스권(20%) + 우선주 포함 + 순매수 정렬 스크리닝] 실행:"
+      f" {now_str}"
+  )
   print("==================================================")
 
-  try:
-    df_krx = fdr.StockListing("KRX")
-    if "MarCap" in df_krx.columns:
-      df_krx = df_krx.sort_values(by="MarCap", ascending=False)
-      target_stocks = df_krx.head(200)
-      tickers = target_stocks["Code"].dropna().tolist()
-      print("시가총액 상위 200개 종목 대상 스캔 시작")
-    else:
-      tickers = df_krx["Code"].dropna().tolist()[:200]
-  except Exception as e:
-    print(f"종목 리스트 불러오기 오류: {e}")
-    tickers = ["005930", "000660", "035420", "035720", "051910"]
+  df_krx = get_target_stocks()
+  if df_krx.empty:
+    print("대상 종목 리스트를 불러오지 못했습니다.")
+    return
+
+  print(
+      f"총 필터링된 타겟 종목 수: {len(df_krx)}개 (우선주 포함, 코스피/코스닥"
+      " 각 상위 400개)"
+  )
 
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=20)
 
-  cond1_results = []
-  cond2_results = []
-  cond3_results = []
+  results = []
 
-  for ticker in tickers:
+  for _, row in df_krx.iterrows():
+    ticker = row["Code"]
+    stock_name = row["Name"]
+
     try:
       df = fdr.DataReader(
           ticker,
@@ -124,21 +167,14 @@ def run_stock_check():
       df_recent = df.tail(5)
       latest_price = df_recent["Close"].iloc[-1]
 
-      stock_row = df_krx[df_krx["Code"] == ticker]
-      stock_name = (
-          stock_row["Name"].values[0] if not stock_row.empty else ticker
-      )
-
-      # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 20% 이내 (수정됨)
+      # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 20% 이내
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       if low_min <= 0:
         continue
 
       price_range_ratio = (high_max - low_min) / low_min
-      is_box = price_range_ratio <= 0.20
-
-      if not is_box:
+      if price_range_ratio > 0.20:
         continue
 
       today_amt, total_amt_5d, positive_days, daily_amounts = (
@@ -161,81 +197,76 @@ def run_stock_check():
           1 for a in daily_amounts if mean_amt > 0 and a >= mean_amt * 2.0
       )
 
-      # 사용자 요청 반영된 완화된 조건 매칭 검증
-      is_cond1 = growth_ratio >= 0.20  # 조건 1: 후반부 20% 이상 증가 (수정됨)
-      is_cond2 = positive_days >= 3  # 조건 2: 5일 중 3일 이상 순매수 유입 (수정됨)
-      is_cond3 = spike_count >= 2  # 조건 3: 평균 대비 2배 폭발 2회 이상 (수정됨)
+      # 조건 검증 (박스권 20%, 후반부 20% 증가, 3일 이상 순매수 유입, 2배 폭발 2회 이상)
+      is_cond1 = growth_ratio >= 0.20
+      is_cond2 = positive_days >= 3
+      is_cond3 = spike_count >= 2
 
       if is_cond1 or is_cond2 or is_cond3:
-        today_mark = (
-            "🔥 당일 순매수 유입" if today_amt > 0 else "💤 당일 관망/매도"
-        )
-        inst_str = (
-            f"기관 순매수 금액: 5일 누적 +{round(total_amt_5d, 1)}억"
-            f" ({positive_days}/5일 유입)\n  - 당일 추정: +{round(today_amt, 1)}억"
-            f" [{today_mark}]"
-        )
-
-        # --- [조건 1] 5일 박스권(20%) + 후반부 순매수 금액 20% 이상 증가 ---
+        matched_tags = []
         if is_cond1:
-          cond1_results.append(
-              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 후반부 금액"
-              f" 증가율: +{round(growth_ratio*100, 1)}%\n  - 💰 {inst_str}"
-          )
-
-        # --- [조건 2] 5일 박스권(20%) + 3일 이상 순매수 유입 ---
+          matched_tags.append("📦후반증가")
         if is_cond2:
-          cond2_results.append(
-              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 순매수 유입"
-              f" 일수: {positive_days}/5일\n  - 💰 {inst_str}"
-          )
-
-        # --- [조건 3] 5일 박스권(20%) + 평균 순매수 금액 2배 폭발 2회 이상 ---
+          matched_tags.append("📈연속매집")
         if is_cond3:
-          cond3_results.append(
-              f"• *{stock_name}* (`{ticker}`)\n  - 현재가: {latest_price:,}원\n"
-              f"  - 5일 변동폭: {round(price_range_ratio*100, 1)}%\n  - 2배 폭발 횟수:"
-              f" {spike_count}회\n  - 💰 {inst_str}"
-          )
+          matched_tags.append("⚡자금폭발")
+
+        results.append({
+            "ticker": ticker,
+            "name": stock_name,
+            "price": latest_price,
+            "box_ratio": round(price_range_ratio * 100, 1),
+            "today_amt": today_amt,
+            "total_amt_5d": total_amt_5d,
+            "positive_days": positive_days,
+            "tags": " ".join(matched_tags),
+        })
 
     except Exception:
       pass
 
-  # 조건별 메시지 독립 전송
-  msg_intro = f"📊 *[단기 5일 박스권(20%) + 큰형님 순매수 금액 리포트]* ({now_str})\n💡 단기 집중 전략: 최근 5거래일 기관 자금 집중도 및 폭발 강도 분석"
+  # 정렬 기준: 기관 순매수 5일 누적 금액 큰 순으로 정렬 (내림차순)
+  results = sorted(results, key=lambda x: x["total_amt_5d"], reverse=True)
+
+  # 시인성을 높인 리포트 작성 및 전송
+  msg_intro = (
+      f"📊 *[단기 5일 박스권(20%) + 우선주 포함 + 기관 수급 TOP 리포트]*\n"
+      f"⏱️ 실행 시간: `{now_str}`\n"
+      f"🎯 정렬 기준: **기관 5일 누적 순매수 금액 큰 순**\n"
+      f"────────────────────────"
+  )
   send_telegram_message(msg_intro)
 
-  msg_cond1 = (
-      f"📦 *[조건 1] 5일 박스권(20%) + 후반부 순매수 금액 20% 이상 증가*\n\n"
-      + (
-          "\n\n".join(cond1_results)
-          if cond1_results
-          else "조건을 만족하는 종목이 없습니다."
+  if not results:
+    send_telegram_message(
+        "❌ 조건을 만족하는 종목이 없습니다 (엄격한 수급 필터 적용 중)."
+    )
+  else:
+    chunk_msg = "🏆 *기관 순매수 상위 스크리닝 결과 (우선주 포함)*\n\n"
+    for idx, item in enumerate(results, 1):
+      today_mark = (
+          f"🔥 +{round(item['today_amt'], 1)}억"
+          if item["today_amt"] > 0
+          else f"💤 {round(item['today_amt'], 1)}억"
       )
-  )
-  send_telegram_message(msg_cond1)
 
-  msg_cond2 = (
-      f"📈 *[조건 2] 5일 박스권(20%) + 3일 이상 순매수 유입*\n\n"
-      + (
-          "\n\n".join(cond2_results)
-          if cond2_results
-          else "조건을 만족하는 종목이 없습니다."
+      line = (
+          f"*{idx}. {item['name']}* (`{item['ticker']}`)\n"
+          f" • 현재가: `{item['price']:,}원` (변동폭: {item['box_ratio']}%)\n"
+          f" • 5일 누적: `+{round(item['total_amt_5d'], 1)}억`"
+          f" ({item['positive_days']}/5일 유입)\n"
+          f" • 당일 추정: {today_mark}\n"
+          f" • 부합 조건: `{item['tags']}`\n\n"
       )
-  )
-  send_telegram_message(msg_cond2)
 
-  msg_cond3 = (
-      f"⚡ *[조건 3] 5일 박스권(20%) + 평균 순매수 금액 2배 폭발 2회 이상*\n\n"
-      + (
-          "\n\n".join(cond3_results)
-          if cond3_results
-          else "조건을 만족하는 종목이 없습니다."
-      )
-  )
-  send_telegram_message(msg_cond3)
+      if len(chunk_msg) + len(line) > 3800:
+        send_telegram_message(chunk_msg)
+        chunk_msg = ""
+
+      chunk_msg += line
+
+    if chunk_msg:
+      send_telegram_message(chunk_msg)
 
   print("모든 리포트 전송 완료!")
   print("==================================================")
