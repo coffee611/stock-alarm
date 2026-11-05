@@ -131,7 +131,7 @@ def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
   print(
-      f" [단기 5일 박스권(20%) + 우선주 포함 + 순매수 정렬 스크리닝] 실행:"
+      f" [단기 5일 박스권(23%) + 우선주 포함 + 기관 수급 정렬 스크리닝] 실행:"
       f" {now_str}"
   )
   print("==================================================")
@@ -167,14 +167,14 @@ def run_stock_check():
       df_recent = df.tail(5)
       latest_price = df_recent["Close"].iloc[-1]
 
-      # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 20% 이내
+      # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 23% 이내 (완화됨)
       high_max = df_recent["High"].max()
       low_min = df_recent["Low"].min()
       if low_min <= 0:
         continue
 
       price_range_ratio = (high_max - low_min) / low_min
-      if price_range_ratio > 0.20:
+      if price_range_ratio > 0.23:
         continue
 
       today_amt, total_amt_5d, positive_days, daily_amounts = (
@@ -197,7 +197,7 @@ def run_stock_check():
           1 for a in daily_amounts if mean_amt > 0 and a >= mean_amt * 2.0
       )
 
-      # 조건 검증 (박스권 20%, 후반부 20% 증가, 3일 이상 순매수 유입, 2배 폭발 2회 이상)
+      # 조건 검증 (박스권 23%, 후반부 20% 증가, 3일 이상 순매수 유입, 2배 폭발 2회 이상)
       is_cond1 = growth_ratio >= 0.20
       is_cond2 = positive_days >= 3
       is_cond3 = spike_count >= 2
@@ -230,7 +230,7 @@ def run_stock_check():
 
   # 시인성을 높인 리포트 작성 및 전송
   msg_intro = (
-      f"📊 *[단기 5일 박스권(20%) + 우선주 포함 + 기관 수급 TOP 리포트]*\n"
+      f"📊 *[단기 5일 박스권(23%) + 우선주 포함 + 기관 수급 TOP 리포트]*\n"
       f"⏱️ 실행 시간: `{now_str}`\n"
       f"🎯 정렬 기준: **기관 5일 누적 순매수 금액 큰 순**\n"
       f"────────────────────────"
