@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 박스권 15%, 조건1 25%, 조건2 4일, 조건3 2회 판정"""
+  """개별 종목 분석 및 박스권 15% 공통 조건 + 조건 1, 2, 3 판정"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -113,7 +113,7 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # [공통 조건] 10거래일 박스권 범위 15% 이내
+    # [공통 전체 조건] 10거래일 박스권 범위 15% 이내로 타이트하게 설정
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
@@ -122,22 +122,29 @@ def process_single_stock(row, start_date_str, end_date_str):
     df_first_half = df_recent.head(5)
     df_second_half = df_recent.tail(5)
 
-    # [조건 1] 박스권 + 후반부 5일 평균이 전반부 5일 평균보다 25% 이상 증가
+    # [조건 1] 박스권 + 후반부 5일 평균이 전반부 5일 평균보다 35% 이상 증가
     first_mean = df_first_half["Amount"].mean()
     second_mean = df_second_half["Amount"].mean()
     is_cond1 = (
-        is_box and (first_mean > 0) and (second_mean >= first_mean * 1.25)
+        is_box and (first_mean > 0) and (second_mean >= first_mean * 1.35)
     )
 
-    # [조건 2] 박스권 + 5거래일 중 전일 대비 증가한 날이 4일 이상
-    amount_diff = df_5d["Amount"].diff().dropna()
-    days_increased = (amount_diff > 0).sum()
-    is_cond2 = is_box and (days_increased >= 4)
+    # [조건 2] 박스권 + 5거래일 중 전일 대비 끊기지 않고 연속으로 증가한 날이 4일 이상
+    amounts = df_5d["Amount"].values
+    max_consecutive = 0
+    current_streak = 0
+    for i in range(1, len(amounts)):
+      if amounts[i] > amounts[i - 1]:
+        current_streak += 1
+      else:
+        current_streak = 0
+      max_consecutive = max(max_consecutive, current_streak)
+    is_cond2 = is_box and (max_consecutive >= 4)
 
-    # [조건 3] 박스권 + 5일 평균 대비 2배 이상 터진 날이 2회 이상 존재
+    # [조건 3] 박스권 + 5일 평균 대비 2배 이상 터진 날이 3회 이상 존재
     mean_5d_amt = df_5d["Amount"].mean()
     high_vol_days = (df_5d["Amount"] >= (mean_5d_amt * 2.0)).sum()
-    is_cond3 = is_box and (high_vol_days >= 2)
+    is_cond3 = is_box and (high_vol_days >= 3)
 
     # AI 수급 강도 등급(A/B/C) 및 한 줄 코멘트 (조건 1, 2, 3용)
     if total_5d_amt >= 50 or ratio_pct >= 2.0:
@@ -178,7 +185,7 @@ def run_stock_check():
   now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
   print("==================================================")
-  print(f" [최종 리포트 전송] 실행: {now_str}")
+  print(f" [박스권 15% 강화 리포트 전송] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -211,7 +218,7 @@ def run_stock_check():
   )
 
   # -------------------------------------------------------------------------
-  # [메시지 1] 조건 1 리포트 (투자의견 포함)
+  # [메시지 1] 조건 1 리포트 (박스권 15% + 후반부 35%+ 증가)
   # -------------------------------------------------------------------------
   cond1_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond1"]],
@@ -219,7 +226,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond1 = (
-      f"🚀 *[조건 1 부합 리포트: 박스권15% + 후반부 평균 25%+ 증가]*\n"
+      f"🚀 *[조건 1 부합 리포트: 박스권15% + 후반부평균 35%+ 증가]*\n"
       f"{meta_header}"
   )
   if not cond1_list:
@@ -233,7 +240,7 @@ def run_stock_check():
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 2] 조건 2 리포트 (투자의견 포함)
+  # [메시지 2] 조건 2 리포트 (박스권 15% + 연속증가 4일 이상)
   # -------------------------------------------------------------------------
   cond2_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond2"]],
@@ -241,7 +248,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond2 = (
-      f"🎯 *[조건 2 부합 리포트: 박스권15% + 5일중 증가일 4일 이상]*\n"
+      f"🎯 *[조건 2 부합 리포트: 박스권15% + 연속증가 4일 이상]*\n"
       f"{meta_header}"
   )
   if not cond2_list:
@@ -255,7 +262,7 @@ def run_stock_check():
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 3] 조건 3 리포트 (투자의견 포함)
+  # [메시지 3] 조건 3 리포트 (박스권 15% + 2배 폭발 3회 이상)
   # -------------------------------------------------------------------------
   cond3_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond3"]],
@@ -263,7 +270,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond3 = (
-      f"⚡ *[조건 3 부합 리포트: 박스권15% + 평균대비 2배 폭발 2회 이상]*\n"
+      f"⚡ *[조건 3 부합 리포트: 박스권15% + 평균대비 2배 폭발 3회 이상]*\n"
       f"{meta_header}"
   )
   if not cond3_list:
@@ -277,7 +284,7 @@ def run_stock_check():
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (순수 데이터만, 투자의견 제외)
+  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (조건 및 투자의견 없이 순수 데이터만)
   # -------------------------------------------------------------------------
   top40_list = sorted(
       all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
