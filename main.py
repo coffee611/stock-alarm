@@ -240,4 +240,80 @@ def run_stock_check():
     return
 
   end_date_dt = datetime.datetime.now()
-  start_date_dt = end_date_dt - datetime.timedelta(days=3
+  start_date_dt = end_date_dt - datetime.timedelta(days=30)
+  start_date_str = start_date_dt.strftime("%Y-%m-%d")
+  end_date_str = end_date_dt.strftime("%Y-%m-%d")
+
+  screened_results = []
+  all_top40_data = []
+
+  with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [
+        executor.submit(
+            process_single_stock, row, start_date_str, end_date_str
+        )
+        for _, row in df_krx.iterrows()
+    ]
+    for future in as_completed(futures):
+      res = future.result()
+      if res is not None:
+        screen_res, top40_res = res
+        if screen_res:
+          screened_results.append(screen_res)
+        if top40_res:
+          all_top40_data.append(top40_res)
+
+  # -------------------------------------------------------------------------
+  # [메시지 1] 조건 1, 2, 3 부합 종목 통합 테이블 리포트
+  # -------------------------------------------------------------------------
+  screened_results = sorted(
+      screened_results, key=lambda x: x["total_amt_10d"], reverse=True
+  )
+
+  msg_screen = (
+      f"📊 *[10일 박스권 수급 스크리닝 (조건 1,2,3 통합)]*\n"
+      f"⏱️ `{now_str}` (10일 누적 순매수순)\n\n"
+  )
+  if not screened_results:
+    msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
+    send_telegram_message(msg_screen)
+  else:
+    msg_screen += "`종목명` | `10일누적` | `등락률` | `부합조건`\n"
+    msg_screen += "---|---|---|---\n"
+    for item in screened_results[:30]:
+      msg_screen += f"**{item['name']}** | +{round(item['total_amt_10d'], 1)}억 | {item['change_rate']}% | `{item['tags']}`\n"
+    send_telegram_message(msg_screen)
+
+  # -------------------------------------------------------------------------
+  # [메시지 2] 기관 5일 순매수 금액 TOP 40 리포트 (테이블 형식)
+  # -------------------------------------------------------------------------
+  all_top40_data = sorted(
+      all_top40_data, key=lambda x: x["total_amt_5d"], reverse=True
+  )
+  top_40_list = all_top40_data[:40]
+
+  msg_top40_intro = f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
+  send_telegram_message(msg_top40_intro)
+
+  for chunk_idx, sub_list in enumerate(
+      [top_40_list[:20], top_40_list[20:40]], 1
+  ):
+    if not sub_list:
+      continue
+    table_msg = (
+        f"📊 *TOP 40 순위 ({1 if chunk_idx==1 else 21} ~"
+        f" {20 if chunk_idx==1 else 40}위)*\n"
+    )
+    table_msg += "`#` | `종목명` | `기관 5일(억)` | `등락률`\n"
+    table_msg += "---|---|---|---\n"
+    for idx, item in enumerate(sub_list, 1):
+      real_idx = idx if chunk_idx == 1 else idx + 20
+      table_msg += f"{real_idx} | **{item['name']}** | +{round(item['total_amt_5d'], 1)}억 | {item['change_rate']}%\n"
+    send_telegram_message(table_msg)
+
+  print("모든 리포트 전송 완료!")
+  print("==================================================")
+
+
+if __name__ == "__main__":
+  run_stock_check()
