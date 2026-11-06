@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def get_naver_institutional_amount_10days(ticker, recent_df):
-  """네이버 금융에서 최근 10거래일 기관 순매수 금액(억원) 추정 및 분석 (안정성 강화)"""
+  """네이버 금융에서 최근 10거래일 실제 기관 순매수 금액(억원) 파싱"""
   url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
   headers = {
       "User-Agent": (
@@ -97,7 +97,7 @@ def get_naver_institutional_amount_10days(ticker, recent_df):
 
   for attempt in range(3):
     try:
-      res = requests.get(url, headers=headers, timeout=7)
+      res = requests.get(url, headers=headers, timeout=5)
       if res.status_code == 200:
         dfs = pd.read_html(res.text)
         for df in dfs:
@@ -125,7 +125,7 @@ def get_naver_institutional_amount_10days(ticker, recent_df):
               except:
                 amounts.append(0.0)
 
-            if not amounts:
+            if not amounts or len(amounts) < 10:
               return 0.0, 0.0, 0.0, 0, []
 
             today_amount = amounts[0]
@@ -134,15 +134,15 @@ def get_naver_institutional_amount_10days(ticker, recent_df):
             positive_days = sum(1 for a in amounts if a > 0)
 
             return today_amount, total_5d, total_10d, positive_days, amounts
-      time.sleep(0.3)
+      time.sleep(0.2)
     except Exception:
-      time.sleep(0.5)
+      time.sleep(0.3)
 
   return 0.0, 0.0, 0.0, 0, []
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 데이터를 병렬로 분석하는 함수 (항상 튜플 반환으로 에러 방지)"""
+  """개별 종목 데이터 분석 및 수급 조건 검증"""
   ticker = row["Code"]
   stock_name = row["Name"]
 
@@ -156,6 +156,7 @@ def process_single_stock(row, start_date_str, end_date_str):
     prev_price = df_recent["Close"].iloc[0]
     change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
+    # 1. 10거래일 박스권 범위 23% 이내 검증
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     if low_min <= 0:
@@ -165,12 +166,14 @@ def process_single_stock(row, start_date_str, end_date_str):
     if price_range_ratio > 0.23:
       return None, None
 
+    # 네이버 실제 기관 순매수 데이터 연동
     today_amt, total_amt_5d, total_amt_10d, positive_days, daily_amounts = (
         get_naver_institutional_amount_10days(ticker, df_recent)
     )
     if not daily_amounts or len(daily_amounts) < 10:
       return None, None
 
+    # 10일 데이터 분할 (전반 5일 vs 후반 5일)
     first_half_avg = sum(daily_amounts[5:]) / 5.0
     second_half_avg = sum(daily_amounts[:5]) / 5.0
     growth_ratio = (
@@ -231,7 +234,7 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [병렬 스캔] 10일 박스권 + TOP 40 리포트 실행: {now_str}")
+  print(f" [병렬 스캔] 10일 박스권 + 실제 기관 수급 연동 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -247,7 +250,7 @@ def run_stock_check():
   screened_results = []
   all_top40_data = []
 
-  with ThreadPoolExecutor(max_workers=10) as executor:
+  with ThreadPoolExecutor(max_workers=8) as executor:
     futures = [
         executor.submit(
             process_single_stock, row, start_date_str, end_date_str
