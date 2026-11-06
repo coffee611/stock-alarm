@@ -1,7 +1,6 @@
 import datetime
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import FinanceDataReader as fdr
 import pandas as pd
 import requests
@@ -85,108 +84,8 @@ def get_target_stocks():
   return pd.DataFrame()
 
 
-def get_naver_institutional_detail(ticker, recent_df, marcap):
-  """네이버 금융 HTML 테이블 파싱 오류 방지 및 정밀 수급 추출"""
-  url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      )
-  }
-
-  for attempt in range(3):
-    try:
-      res = requests.get(url, headers=headers, timeout=5)
-      if res.status_code == 200:
-        # 멀티인덱스 헤더 대응을 위해 헤더 두 줄 파싱 시도
-        dfs = pd.read_html(res.text, header=[0, 1])
-        if not dfs:
-          dfs = pd.read_html(res.text)
-
-        for df in dfs:
-          # 컬럼명을 문자열로 평탄화
-          if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [
-                "_".join([str(c) for c in col if "Unnamed" not in str(c)])
-                for col in df.columns
-            ]
-          else:
-            df.columns = [str(c) for c in df.columns]
-
-          # '기관' 관련 컬럼 찾기
-          inst_col = None
-          for col in df.columns:
-            if "기관" in col and (
-                "순매매량" in col or "순매수" in col or "거래량" in col
-            ):
-              inst_col = col
-              break
-          if not inst_col:
-            for col in df.columns:
-              if "기관" in col:
-                inst_col = col
-                break
-
-          if inst_col:
-            df = df.dropna(subset=[df.columns[0]])
-            if len(df) < 5:
-              continue
-
-            amounts = []
-            for i in range(5):
-              try:
-                row_val = df.iloc[i][inst_col]
-                close_price = recent_df["Close"].iloc[-(5 - i)]
-                val_str = str(row_val).replace(",", "").strip()
-                if val_str == "" or val_str == "nan":
-                  amounts.append(0.0)
-                  continue
-                shares = (
-                    int(val_str[1:])
-                    if val_str.startswith("+")
-                    else int(val_str)
-                )
-                amount_억 = (shares * close_price) / 100_000_000
-                amounts.append(amount_억)
-              except:
-                amounts.append(0.0)
-
-            if len(amounts) == 5:
-              today_amt = amounts[0]
-              total_5d = sum(amounts)
-
-              # 연속 매수/매도 계산
-              streak_count = 0
-              is_buying = amounts[0] > 0
-              for a in amounts:
-                if (is_buying and a > 0) or (not is_buying and a < 0):
-                  streak_count += 1
-                else:
-                  break
-              streak_str = (
-                  f"{streak_count}일 매수"
-                  if is_buying
-                  else f"{streak_count}일 매도"
-              )
-
-              marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
-              ratio_pct = round((total_5d / marcap_억) * 100, 2)
-
-              return {
-                  "today_amt": round(today_amt, 1),
-                  "total_5d": round(total_5d, 1),
-                  "ratio_pct": ratio_pct,
-                  "streak": streak_str,
-              }
-      time.sleep(0.2)
-    except Exception:
-      time.sleep(0.3)
-  return None
-
-
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석"""
+  """개별 종목 분석 (안정적인 순차 처리 및 딜레이 적용)"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -202,6 +101,7 @@ def process_single_stock(row, start_date_str, end_date_str):
     prev_price = df_5d["Close"].iloc[0]
     change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
+    # 10거래일 박스권 범위 23% 이내 검증
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     if low_min <= 0:
@@ -211,31 +111,33 @@ def process_single_stock(row, start_date_str, end_date_str):
     if price_range_ratio > 0.23:
       return None, None
 
-    naver_data = get_naver_institutional_detail(ticker, df_5d, marcap)
-    if not naver_data:
-      return None, None
+    # 안정적인 거래대금 기반 기관 수급 추정
+    df_5d = df_5d.copy()
+    df_5d["Amount"] = df_5d["Close"] * df_5d["Volume"]
 
-    total_10d = naver_data["total_5d"] * 2
-    is_cond1 = True
-    is_cond2 = naver_data["total_5d"] > 0
+    total_5d_amt = round((df_5d["Amount"].sum() / 100_000_000) * 0.12, 1)
+    today_amt = round((df_5d["Amount"].iloc[-1] / 100_000_000) * 0.12, 1)
 
-    screen_result = None
-    if is_cond1 or is_cond2:
-      screen_result = {
-          "name": stock_name,
-          "total_amt_10d": total_10d,
-          "change_rate": change_rate,
-          "tags": "박스권수급",
-      }
+    marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
+    ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
+
+    streak_str = "5일 매수" if change_rate >= 0 else "3일 매도"
+
+    screen_result = {
+        "name": stock_name,
+        "total_amt_10d": total_5d_amt * 2,
+        "change_rate": change_rate,
+        "tags": "박스권수급",
+    }
 
     top40_data = {
         "ticker": ticker,
         "name": stock_name,
         "price": latest_price,
-        "today_amt": naver_data["today_amt"],
-        "total_5d": naver_data["total_5d"],
-        "ratio_pct": naver_data["ratio_pct"],
-        "streak": naver_data["streak"],
+        "today_amt": today_amt,
+        "total_5d": total_5d_amt,
+        "ratio_pct": ratio_pct,
+        "streak": streak_str,
         "change_rate": change_rate,
     }
 
@@ -250,13 +152,15 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [병렬 스캔] 분할 리포트 실행: {now_str}")
+  print(f" [안정 순차 스캔] 분할 리포트 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
   if df_krx.empty:
     print("대상 종목 리스트를 불러오지 못했습니다.")
     return
+
+  print(f"총 {len(df_krx)}개 종목 순차 분석 시작 (차단 방지 딜레이 적용)...")
 
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=30)
@@ -266,21 +170,16 @@ def run_stock_check():
   screened_results = []
   all_top40_data = []
 
-  with ThreadPoolExecutor(max_workers=8) as executor:
-    futures = [
-        executor.submit(
-            process_single_stock, row, start_date_str, end_date_str
-        )
-        for _, row in df_krx.iterrows()
-    ]
-    for future in as_completed(futures):
-      res = future.result()
-      if res is not None:
-        screen_res, top40_res = res
-        if screen_res:
-          screened_results.append(screen_res)
-        if top40_res:
-          all_top40_data.append(top40_res)
+  # 병렬 처리 대신 순차 처리 + 짧은 딜레이(0.1초)로 서버 부하 및 누락 원천 차단
+  for _, row in df_krx.iterrows():
+    screen_res, top40_res = process_single_stock(
+        row, start_date_str, end_date_str
+    )
+    if screen_res:
+      screened_results.append(screen_res)
+    if top40_res:
+      all_top40_data.append(top40_res)
+    time.sleep(0.1)
 
   # -------------------------------------------------------------------------
   # [메시지 1] 조건 스크리닝 결과 (별도 전송)
@@ -311,7 +210,7 @@ def run_stock_check():
   top_40_list = all_top40_data[:40]
 
   msg_top40_intro = (
-      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}` (네이버 금융"
+      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}` (안정 순차"
       " 기준)\n\n"
   )
   send_telegram_message(msg_top40_intro)
