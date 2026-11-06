@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 단기 5일 박스권(15%) + 수정된 조건 1, 2, 3 판정 (우선주 포함)"""
+  """개별 종목 분석 및 단기 5일 박스권(15%) + 조건 1(30%), 조건2(연속4일), 조건3(2배 2회) 판정"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -143,9 +143,6 @@ def process_single_stock(row, start_date_str, end_date_str):
     high_vol_days = (df_5d["Amount"] >= (mean_5d_amt * 2.0)).sum()
     is_cond3 = is_box and (high_vol_days >= 2)
 
-    # 중복 충족 개수 산출 (조건 1, 2, 3 중 몇 개를 만족하는지)
-    match_count = sum([is_cond1, is_cond2, is_cond3])
-
     # AI 수급 강도 등급(A/B/C) 및 한 줄 코멘트
     if total_5d_amt >= 50 or ratio_pct >= 2.0:
       ai_grade = "A (매우 강함)"
@@ -170,7 +167,6 @@ def process_single_stock(row, start_date_str, end_date_str):
         "is_cond1": is_cond1,
         "is_cond2": is_cond2,
         "is_cond3": is_cond3,
-        "match_count": match_count,
     }
 
     return stock_data
@@ -186,7 +182,7 @@ def run_stock_check():
   now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
   print("==================================================")
-  print(f" [검색 종목수/해당 종목수 표기 스크리닝] 실행: {now_str}")
+  print(f" [단기 박스권 15% 정밀 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -214,35 +210,27 @@ def run_stock_check():
       if res:
         all_analyzed_stocks.append(res)
 
-  # 다중 조건 중복 충족 종목(match_count >= 2)만 필터링
-  overlap_cond1_list = sorted(
-      [s for s in all_analyzed_stocks if s["is_cond1"] and s["match_count"] >= 2],
-      key=lambda x: (x["match_count"], x["total_5d"]),
+  # 각 조건별 독립 리스트 필터링
+  cond1_list = sorted(
+      [s for s in all_analyzed_stocks if s["is_cond1"]],
+      key=lambda x: x["total_5d"],
       reverse=True,
   )
-  overlap_cond2_list = sorted(
-      [s for s in all_analyzed_stocks if s["is_cond2"] and s["match_count"] >= 2],
-      key=lambda x: (x["match_count"], x["total_5d"]),
+  cond2_list = sorted(
+      [s for s in all_analyzed_stocks if s["is_cond2"]],
+      key=lambda x: x["total_5d"],
       reverse=True,
   )
-  overlap_cond3_list = sorted(
-      [s for s in all_analyzed_stocks if s["is_cond3"] and s["match_count"] >= 2],
-      key=lambda x: (x["match_count"], x["total_5d"]),
+  cond3_list = sorted(
+      [s for s in all_analyzed_stocks if s["is_cond3"]],
+      key=lambda x: x["total_5d"],
       reverse=True,
   )
-
-  # 종합 올라운드 주도주 (2개 이상 동시 만족 전체)
-  overlap_all_list = sorted(
-      [s for s in all_analyzed_stocks if s["match_count"] >= 2],
-      key=lambda x: (x["match_count"], x["total_5d"]),
-      reverse=True,
-  )
-
   top40_list = sorted(
       all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
   )[:40]
 
-  # 공통 헤더 생성 함수 (검색한 종목수 / 해당 종목 수 정확히 표기)
+  # 공통 헤더 생성 함수 (검색한 종목수 / 해당 종목 수 표기)
   def get_meta_header(matched_count):
     return (
         f"📅 *자료 기준일자 및 시간*: `{now_str}`\n"
@@ -252,91 +240,58 @@ def run_stock_check():
     )
 
   # -------------------------------------------------------------------------
-  # [메시지 1] 멀티 조건 중복 충족 (올라운드 주도주) 종합 리포트
-  # -------------------------------------------------------------------------
-  msg_overlap = (
-      f"🌟 *[멀티 조건 중복 충족 (올라운드 주도주) 리포트]*\n"
-      f"✨ *(조건 1, 2, 3 중 2개 이상 동시 만족 종목)*\n"
-      f"{get_meta_header(len(overlap_all_list))}"
-  )
-  if not overlap_all_list:
-    msg_overlap += "❌ 다중 조건을 동시에 만족하는 종목이 없습니다."
-  else:
-    for item in overlap_all_list[:20]:
-      msg_overlap += (
-          f"👑 **{item['name']}** ⭐ *[조건 {item['match_count']}개 중복"
-          f" 충족]* (등급: `{item['ai_grade']}`)\n"
-      )
-      msg_overlap += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
-      msg_overlap += f"   💡 *투자의견*: {item['ai_comment']}\n\n"
-  send_telegram_message(msg_overlap)
-  time.sleep(0.5)
-
-  # -------------------------------------------------------------------------
-  # [메시지 2] 조건 1 리포트 (중복 충족 종목만)
+  # [메시지 1] 조건 1 리포트
   # -------------------------------------------------------------------------
   msg_cond1 = (
       f"🚀 *[조건 1 부합 리포트: 5일 박스15% + 후반부 30%+ 증가]*\n"
-      f"✨ *(조건 1 만족 중 다중 조건 중복 충족 종목)*\n"
-      f"{get_meta_header(len(overlap_cond1_list))}"
+      f"{get_meta_header(len(cond1_list))}"
   )
-  if not overlap_cond1_list:
-    msg_cond1 += "❌ 조건을 만족하는 중복 충족 종목이 없습니다."
+  if not cond1_list:
+    msg_cond1 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
-    for item in overlap_cond1_list[:20]:
-      msg_cond1 += (
-          f"🔹 **{item['name']}** ⭐ *[조건 {item['match_count']}개 중복"
-          f" 충족]* (등급: `{item['ai_grade']}`)\n"
-      )
+    for item in cond1_list[:20]:
+      msg_cond1 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
       msg_cond1 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
       msg_cond1 += f"   💡 *투자의견*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond1)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 3] 조건 2 리포트 (중복 충족 종목만)
+  # [메시지 2] 조건 2 리포트
   # -------------------------------------------------------------------------
   msg_cond2 = (
       f"🎯 *[조건 2 부합 리포트: 5일 박스15% + 연속증가 4일]*\n"
-      f"✨ *(조건 2 만족 중 다중 조건 중복 충족 종목)*\n"
-      f"{get_meta_header(len(overlap_cond2_list))}"
+      f"{get_meta_header(len(cond2_list))}"
   )
-  if not overlap_cond2_list:
-    msg_cond2 += "❌ 조건을 만족하는 중복 충족 종목이 없습니다."
+  if not cond2_list:
+    msg_cond2 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
-    for item in overlap_cond2_list[:20]:
-      msg_cond2 += (
-          f"🔹 **{item['name']}** ⭐ *[조건 {item['match_count']}개 중복"
-          f" 충족]* (등급: `{item['ai_grade']}`)\n"
-      )
+    for item in cond2_list[:20]:
+      msg_cond2 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
       msg_cond2 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
       msg_cond2 += f"   💡 *투자의견*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond2)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 4] 조건 3 리포트 (중복 충족 종목만)
+  # [메시지 3] 조건 3 리포트
   # -------------------------------------------------------------------------
   msg_cond3 = (
       f"⚡ *[조건 3 부합 리포트: 5일 박스15% + 평균대비 2배 폭발 2회 이상]*\n"
-      f"✨ *(조건 3 만족 중 다중 조건 중복 충족 종목)*\n"
-      f"{get_meta_header(len(overlap_cond3_list))}"
+      f"{get_meta_header(len(cond3_list))}"
   )
-  if not overlap_cond3_list:
-    msg_cond3 += "❌ 조건을 만족하는 중복 충족 종목이 없습니다."
+  if not cond3_list:
+    msg_cond3 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
-    for item in overlap_cond3_list[:20]:
-      msg_cond3 += (
-          f"🔹 **{item['name']}** ⭐ *[조건 {item['match_count']}개 중복"
-          f" 충족]* (등급: `{item['ai_grade']}`)\n"
-      )
+    for item in cond3_list[:20]:
+      msg_cond3 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
       msg_cond3 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
       msg_cond3 += f"   💡 *투자의견*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond3)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 5] 기관 5일 순매수 TOP 40 리포트 (순수 데이터만)
+  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (순수 데이터만)
   # -------------------------------------------------------------------------
   msg_top40_intro = (
       f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n"
