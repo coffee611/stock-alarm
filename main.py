@@ -85,7 +85,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석"""
+  """개별 종목 분석 및 조건 판별"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -93,7 +93,7 @@ def process_single_stock(row, start_date_str, end_date_str):
   try:
     df = fdr.DataReader(ticker, start_date_str, end_date_str)
     if len(df) < 10:
-      return None, None
+      return None
 
     df_recent = df.tail(10)
     df_5d = df.tail(5)
@@ -101,17 +101,17 @@ def process_single_stock(row, start_date_str, end_date_str):
     prev_price = df_5d["Close"].iloc[0]
     change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
-    # 10거래일 박스권 범위 23% 이내 검증
+    # 1. 10거래일 박스권 범위 23% 이내 검증
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     if low_min <= 0:
-      return None, None
+      return None
 
     price_range_ratio = (high_max - low_min) / low_min
     if price_range_ratio > 0.23:
-      return None, None
+      return None
 
-    # 안정적인 거래대금 기반 기관 수급 추정
+    # 거래대금 기반 수급 추정
     df_5d = df_5d.copy()
     df_5d["Amount"] = df_5d["Close"] * df_5d["Volume"]
 
@@ -121,38 +121,65 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    streak_str = "5일 연속매수" if change_rate >= 0 else "3일 연속매도"
+    # 10일 전반/후반 분할 데이터 시뮬레이션 (조건 1 판정용)
+    df_first_half = df_recent.head(5)
+    df_second_half = df_recent.tail(5)
+    first_amt = (
+        df_first_half["Close"] * df_first_half["Volume"]
+    ).sum() / 100_000_000
+    second_amt = (
+        df_second_half["Close"] * df_second_half["Volume"]
+    ).sum() / 100_000_000
 
-    screen_result = {
-        "name": stock_name,
-        "total_amt_10d": total_5d_amt * 2,
-        "change_rate": change_rate,
-        "tags": "박스권수급",
-    }
+    # 조건 판정 로직
+    matched_tags = []
 
-    top40_data = {
-        "ticker": ticker,
+    # 조건 1: 후반부 수급 증가 (후반 5일 거래대금이 전반 5일 대비 20% 이상 증가)
+    is_cond1 = second_amt >= first_amt * 1.2
+    if is_cond1:
+      matched_tags.append("후반증가")
+
+    # 조건 2: 최근 5일 중 상승장 흐름 (연속성 매집 대용)
+    is_cond2 = change_rate > 0
+    if is_cond2:
+      matched_tags.append("연속매집")
+
+    # 조건 3: 거래대금 폭발 (당일 거래대금이 평균 대비 2배 이상)
+    mean_amt = df_recent["Amount"].mean()
+    is_cond3 = (
+        df_recent["Amount"].iloc[-1] >= mean_amt * 2.0 if mean_amt > 0 else False
+    )
+    if is_cond3:
+      matched_tags.append("자금폭발")
+
+    # 조건 1, 2, 3 중 하나라도 만족하면 스크리닝 대상에 포함
+    is_screen_target = len(matched_tags) > 0
+
+    stock_data = {
         "name": stock_name,
         "price": latest_price,
         "today_amt": today_amt,
         "total_5d": total_5d_amt,
+        "total_10d": round(total_5d_amt * 2, 1),
         "ratio_pct": ratio_pct,
-        "streak": streak_str,
+        "streak": "5일 연속매수" if change_rate >= 0 else "3일 연속매도",
         "change_rate": change_rate,
+        "tags": ", ".join(matched_tags) if matched_tags else "일반박스권",
+        "is_screened": is_screen_target,
     }
 
-    return screen_result, top40_data
+    return stock_data
 
   except Exception:
     pass
 
-  return None, None
+  return None
 
 
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [초고가독성 리포트] 실행: {now_str}")
+  print(f" [완벽 분리 리포트] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -167,44 +194,39 @@ def run_stock_check():
   start_date_str = start_date_dt.strftime("%Y-%m-%d")
   end_date_str = end_date_dt.strftime("%Y-%m-%d")
 
-  screened_results = []
-  all_top40_data = []
+  all_analyzed_stocks = []
 
   for _, row in df_krx.iterrows():
-    screen_res, top40_res = process_single_stock(
-        row, start_date_str, end_date_str
-    )
-    if screen_res:
-      screened_results.append(screen_res)
-    if top40_res:
-      all_top40_data.append(top40_res)
+    res = process_single_stock(row, start_date_str, end_date_str)
+    if res:
+      all_analyzed_stocks.append(res)
     time.sleep(0.1)
 
   # -------------------------------------------------------------------------
-  # [메시지 1] 조건 스크리닝 결과
+  # [리포트 1] 10일 박스권 + 조건(1, 2, 3) 부합 종목 리포트 (독립 전송)
   # -------------------------------------------------------------------------
-  screened_results = sorted(
-      screened_results, key=lambda x: x["total_amt_10d"], reverse=True
+  screened_list = [s for s in all_analyzed_stocks if s["is_screened"]]
+  screened_list = sorted(
+      screened_list, key=lambda x: x["total_10d"], reverse=True
   )
 
   msg_screen = (
-      f"📊 *[10일 박스권 수급 스크리닝 리포트]*\n⏱️ `{now_str}`\n\n"
+      f"📊 *[10일 박스권 수급 조건(1,2,3) 부합 리포트]*\n⏱️ `{now_str}`\n\n"
   )
-  if not screened_results:
+  if not screened_list:
     msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
     send_telegram_message(msg_screen)
   else:
-    for item in screened_results[:25]:
-      msg_screen += f"• **{item['name']}** | 누적 +{item['total_amt_10d']}억 | 등락 `{item['change_rate']}%` | `{item['tags']}`\n"
+    for item in screened_list[:25]:
+      msg_screen += f"• **{item['name']}** | 누적 +{item['total_10d']}억 | 등락 `{item['change_rate']}%` | `{item['tags']}`\n"
     send_telegram_message(msg_screen)
 
   # -------------------------------------------------------------------------
-  # [메시지 2 & 3] 기관 5일 순매수 금액 TOP 40 리포트 (최고 시인성 블록 포맷)
+  # [리포트 2] 기관 5일 순매수 금액 TOP 40 리포트 (독립 전송, 시인성 최적화)
   # -------------------------------------------------------------------------
-  all_top40_data = sorted(
-      all_top40_data, key=lambda x: x["total_5d"], reverse=True
-  )
-  top_40_list = all_top40_data[:40]
+  top40_list = sorted(
+      all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
+  )[:40]
 
   msg_top40_intro = (
       f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
@@ -212,7 +234,7 @@ def run_stock_check():
   send_telegram_message(msg_top40_intro)
 
   for chunk_idx, sub_list in enumerate(
-      [top_40_list[:20], top_40_list[20:40]], 1
+      [top40_list[:20], top40_list[20:40]], 1
   ):
     if not sub_list:
       continue
@@ -225,13 +247,12 @@ def run_stock_check():
       today_mark = (
           f"+{item['today_amt']}" if item["today_amt"] > 0 else f"{item['today_amt']}"
       )
-      
-      # 모바일 가독성을 극대화한 블록형 리스트 디자인
+
       list_msg += f"🔹 **{real_idx}. {item['name']}**\n"
       list_msg += f"   ▪️ 5일 순매수: `+{item['total_5d']}억` (시총비율 `{item['ratio_pct']}%`)\n"
       list_msg += f"   ▪️ 당일 추정금액: `{today_mark}억` | 연속: `{item['streak']}`\n"
       list_msg += f"   ▪️ 주가 등락률: `{item['change_rate']}%`\n\n"
-      
+
     send_telegram_message(list_msg)
 
   print("모든 리포트 전송 완료!")
