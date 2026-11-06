@@ -1,5 +1,6 @@
 import datetime
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import FinanceDataReader as fdr
 import pandas as pd
@@ -27,6 +28,7 @@ def send_telegram_message(message):
           "parse_mode": "Markdown",
       }
       requests.post(url, data=payload, timeout=10)
+      time.sleep(0.5)
     print("텔레그램 분할 알림 전송 성공!")
   else:
     payload = {
@@ -84,49 +86,58 @@ def get_target_stocks():
 
 
 def get_naver_institutional_amount_10days(ticker, recent_df):
-  """네이버 금융에서 최근 10거래일 기관 순매수 금액(억원) 추정 및 분석"""
-  try:
-    url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-    }
-    res = requests.get(url, headers=headers, timeout=5)
-    if res.status_code == 200:
-      dfs = pd.read_html(res.text)
-      for df in dfs:
-        cols = [str(c) for c in df.columns]
-        inst_col_candidates = [c for c in cols if "기관" in c]
-        if inst_col_candidates:
-          inst_col = inst_col_candidates[0]
-          df = df.dropna(subset=[df.columns[0]])
-          if len(df) < 10:
-            continue
+  """네이버 금융에서 최근 10거래일 기관 순매수 금액(억원) 추정 및 분석 (안정성 강화)"""
+  url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      )
+  }
 
-          amounts = []
-          for i in range(10):
-            row_val = df.iloc[i][inst_col]
-            close_price = recent_df["Close"].iloc[-(10 - i)]
-            try:
-              val_str = str(row_val).replace(",", "").strip()
-              shares = int(val_str[1:]) if val_str.startswith("+") else int(val_str)
-              amount_억 = (shares * close_price) / 100_000_000
-              amounts.append(amount_억)
-            except:
-              amounts.append(0.0)
+  for attempt in range(3):  # 실패 시 최대 3번까지 재시도
+    try:
+      res = requests.get(url, headers=headers, timeout=7)
+      if res.status_code == 200:
+        dfs = pd.read_html(res.text)
+        for df in dfs:
+          cols = [str(c) for c in df.columns]
+          inst_col_candidates = [c for c in cols if "기관" in c]
+          if inst_col_candidates:
+            inst_col = inst_col_candidates[0]
+            df = df.dropna(subset=[df.columns[0]])
+            if len(df) < 10:
+              continue
 
-          if not amounts:
-            return 0.0, 0.0, 0.0, 0, []
+            amounts = []
+            for i in range(10):
+              row_val = df.iloc[i][inst_col]
+              close_price = recent_df["Close"].iloc[-(10 - i)]
+              try:
+                val_str = str(row_val).replace(",", "").strip()
+                shares = (
+                    int(val_str[1:])
+                    if val_str.startswith("+")
+                    else int(val_str)
+                )
+                amount_억 = (shares * close_price) / 100_000_000
+                amounts.append(amount_억)
+              except:
+                amounts.append(0.0)
 
-          today_amount = amounts[0]
-          total_5d = sum(amounts[:5])
-          total_10d = sum(amounts)
-          positive_days = sum(1 for a in amounts if a > 0)
+            if not amounts:
+              return 0.0, 0.0, 0.0, 0, []
 
-          return today_amount, total_5d, total_10d, positive_days, amounts
-  except Exception:
-    pass
+            today_amount = amounts[0]
+            total_5d = sum(amounts[:5])
+            total_10d = sum(amounts)
+            positive_days = sum(1 for a in amounts if a > 0)
+
+            return today_amount, total_5d, total_10d, positive_days, amounts
+      time.sleep(0.3)
+    except Exception:
+      time.sleep(0.5)
+
   return 0.0, 0.0, 0.0, 0, []
 
 
@@ -221,7 +232,7 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [병렬 스캔] 10일 박스권 + 통합 테이블 및 TOP 40 리포트 실행: {now_str}")
+  print(f" [병렬 스캔] 10일 박스권 + 안정화된 TOP 40 리포트 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -237,7 +248,8 @@ def run_stock_check():
   screened_results = []
   all_top40_data = []
 
-  with ThreadPoolExecutor(max_workers=15) as executor:
+  # 워커 수를 약간 조절(10개)하여 네이버 서버 차단 방지 및 안정성 확보
+  with ThreadPoolExecutor(max_workers=10) as executor:
     futures = [
         executor.submit(
             process_single_stock, row, start_date_str, end_date_str
@@ -266,7 +278,6 @@ def run_stock_check():
     msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
     send_telegram_message(msg_screen)
   else:
-    # 텔레그램 메시지 길이 제한을 고려하여 상위 30개 종목을 하나의 표로 전송
     msg_screen += "`종목명` | `10일누적` | `등락률` | `부합조건`\n"
     msg_screen += "---|---|---|---\n"
     for item in screened_results[:30]:
@@ -300,9 +311,4 @@ def run_stock_check():
       table_msg += f"{real_idx} | **{item['name']}** | +{round(item['total_amt_5d'], 1)}억 | {item['change_rate']}%\n"
     send_telegram_message(table_msg)
 
-  print("모든 리포트 전송 완료!")
-  print("==================================================")
-
-
-if __name__ == "__main__":
-  run_stock_check()
+  print
