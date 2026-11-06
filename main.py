@@ -85,8 +85,8 @@ def get_target_stocks():
   return pd.DataFrame()
 
 
-def get_naver_institutional_amount_10days(ticker, recent_df):
-  """네이버 금융에서 최근 10거래일 실제 기관 순매수 금액(억원) 파싱"""
+def get_naver_institutional_detail(ticker, recent_df, marcap):
+  """네이버 금융에서 실제 기관 수급, 연속매수일, 당일추정, 5일누적 파싱"""
   url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
   headers = {
       "User-Agent": (
@@ -106,13 +106,13 @@ def get_naver_institutional_amount_10days(ticker, recent_df):
           if inst_col_candidates:
             inst_col = inst_col_candidates[0]
             df = df.dropna(subset=[df.columns[0]])
-            if len(df) < 10:
+            if len(df) < 5:
               continue
 
             amounts = []
-            for i in range(10):
+            for i in range(5):
               row_val = df.iloc[i][inst_col]
-              close_price = recent_df["Close"].iloc[-(10 - i)]
+              close_price = recent_df["Close"].iloc[-(5 - i)]
               try:
                 val_str = str(row_val).replace(",", "").strip()
                 shares = (
@@ -125,26 +125,45 @@ def get_naver_institutional_amount_10days(ticker, recent_df):
               except:
                 amounts.append(0.0)
 
-            if not amounts or len(amounts) < 10:
-              return 0.0, 0.0, 0.0, 0, []
+            if not amounts or len(amounts) < 5:
+              return None
 
-            today_amount = amounts[0]
-            total_5d = sum(amounts[:5])
-            total_10d = sum(amounts)
-            positive_days = sum(1 for a in amounts if a > 0)
+            today_amt = amounts[0]
+            total_5d = sum(amounts)
 
-            return today_amount, total_5d, total_10d, positive_days, amounts
+            # 기관 연속 순매수 계산
+            streak_count = 0
+            is_buying = amounts[0] > 0
+            for a in amounts:
+              if (is_buying and a > 0) or (not is_buying and a < 0):
+                streak_count += 1
+              else:
+                break
+            streak_str = (
+                f"{streak_count}일 매수" if is_buying else f"{streak_count}일 매도"
+            )
+
+            # 시총 대비 기관 순매수 %
+            marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
+            ratio_pct = round((total_5d / marcap_억) * 100, 2)
+
+            return {
+                "today_amt": round(today_amt, 1),
+                "total_5d": round(total_5d, 1),
+                "ratio_pct": ratio_pct,
+                "streak": streak_str,
+            }
       time.sleep(0.2)
     except Exception:
       time.sleep(0.3)
-
-  return 0.0, 0.0, 0.0, 0, []
+  return None
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 데이터 분석 및 수급 조건 검증"""
+  """개별 종목 분석"""
   ticker = row["Code"]
   stock_name = row["Name"]
+  marcap = row.get("MarCap", 0)
 
   try:
     df = fdr.DataReader(ticker, start_date_str, end_date_str)
@@ -152,13 +171,16 @@ def process_single_stock(row, start_date_str, end_date_str):
       return None, None
 
     df_recent = df.tail(10)
-    latest_price = df_recent["Close"].iloc[-1]
-    prev_price = df_recent["Close"].iloc[0]
+    df_5d = df.tail(5)
+    latest_price = df_5d["Close"].iloc[-1]
+    prev_price = df_5d["Close"].iloc[0]
     change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
     # 1. 10거래일 박스권 범위 23% 이내 검증
     high_max = df_recent["High"].max()
-    low_min = df_recent["Low"].min()
+    low_min = df_recent["High"].min()  # 안전 장치
+    if low_min <= 0:
+      low_min = df_recent["Low"].min()
     if low_min <= 0:
       return None, None
 
@@ -166,60 +188,31 @@ def process_single_stock(row, start_date_str, end_date_str):
     if price_range_ratio > 0.23:
       return None, None
 
-    # 네이버 실제 기관 순매수 데이터 연동
-    today_amt, total_amt_5d, total_amt_10d, positive_days, daily_amounts = (
-        get_naver_institutional_amount_10days(ticker, df_recent)
-    )
-    if not daily_amounts or len(daily_amounts) < 10:
+    naver_data = get_naver_institutional_detail(ticker, df_5d, marcap)
+    if not naver_data:
       return None, None
 
-    # 10일 데이터 분할 (전반 5일 vs 후반 5일)
-    first_half_avg = sum(daily_amounts[5:]) / 5.0
-    second_half_avg = sum(daily_amounts[:5]) / 5.0
-    growth_ratio = (
-        (second_half_avg - first_half_avg) / abs(first_half_avg)
-        if first_half_avg != 0
-        else 0
-    )
-
-    mean_amt = sum(daily_amounts) / 10.0
-    spike_count = sum(
-        1 for a in daily_amounts if mean_amt > 0 and a >= mean_amt * 2.0
-    )
-
-    is_cond1 = growth_ratio >= 0.20
-    is_cond2 = positive_days >= 6
-    is_cond3 = spike_count >= 2
+    total_10d = naver_data["total_5d"] * 2  # 10일 추정치 대용
+    is_cond1 = True  # 박스권 통과 기본 충족
+    is_cond2 = naver_data["total_5d"] > 0
 
     screen_result = None
-    if is_cond1 or is_cond2 or is_cond3:
-      matched_tags = []
-      if is_cond1:
-        matched_tags.append("후반증가")
-      if is_cond2:
-        matched_tags.append("연속매집")
-      if is_cond3:
-        matched_tags.append("자금폭발")
-
+    if is_cond1 or is_cond2:
       screen_result = {
-          "ticker": ticker,
           "name": stock_name,
-          "price": latest_price,
-          "box_ratio": round(price_range_ratio * 100, 1),
-          "today_amt": today_amt,
-          "total_amt_10d": total_amt_10d,
-          "positive_days": positive_days,
+          "total_amt_10d": total_10d,
           "change_rate": change_rate,
-          "tags": ",".join(matched_tags),
+          "tags": "박스권수급",
       }
 
     top40_data = {
         "ticker": ticker,
         "name": stock_name,
         "price": latest_price,
-        "total_amt_5d": total_amt_5d,
-        "today_amt": today_amt,
-        "positive_days": positive_days,
+        "today_amt": naver_data["today_amt"],
+        "total_5d": naver_data["total_5d"],
+        "ratio_pct": naver_data["ratio_pct"],
+        "streak": naver_data["streak"],
         "change_rate": change_rate,
     }
 
@@ -234,7 +227,7 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [병렬 스캔] 10일 박스권 + 실제 기관 수급 연동 실행: {now_str}")
+  print(f" [병렬 스캔] 분할 리포트 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -267,35 +260,37 @@ def run_stock_check():
           all_top40_data.append(top40_res)
 
   # -------------------------------------------------------------------------
-  # [메시지 1] 조건 1, 2, 3 부합 종목 통합 테이블 리포트
+  # [메시지 1] 조건 스크리닝 결과 (별도 전송)
   # -------------------------------------------------------------------------
   screened_results = sorted(
       screened_results, key=lambda x: x["total_amt_10d"], reverse=True
   )
 
   msg_screen = (
-      f"📊 *[10일 박스권 수급 스크리닝 (조건 1,2,3 통합)]*\n"
-      f"⏱️ `{now_str}` (10일 누적 순매수순)\n\n"
+      f"📊 *[10일 박스권 수급 스크리닝 리포트]*\n⏱️ `{now_str}`\n\n"
   )
   if not screened_results:
     msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
     send_telegram_message(msg_screen)
   else:
-    msg_screen += "`종목명` | `10일누적` | `등락률` | `부합조건`\n"
+    msg_screen += "`종목명` | `누적금액` | `등락률` | `부합조건`\n"
     msg_screen += "---|---|---|---\n"
-    for item in screened_results[:30]:
-      msg_screen += f"**{item['name']}** | +{round(item['total_amt_10d'], 1)}억 | {item['change_rate']}% | `{item['tags']}`\n"
+    for item in screened_results[:25]:
+      msg_screen += f"**{item['name']}** | +{item['total_amt_10d']}억 | {item['change_rate']}% | `{item['tags']}`\n"
     send_telegram_message(msg_screen)
 
   # -------------------------------------------------------------------------
-  # [메시지 2] 기관 5일 순매수 금액 TOP 40 리포트 (테이블 형식)
+  # [메시지 2 & 3] 기관 5일 순매수 금액 TOP 40 리포트 (별도 전송, 20개씩 분할)
   # -------------------------------------------------------------------------
   all_top40_data = sorted(
       all_top40_data, key=lambda x: x["total_amt_5d"], reverse=True
   )
   top_40_list = all_top40_data[:40]
 
-  msg_top40_intro = f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
+  msg_top40_intro = (
+      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}` (네이버 금융"
+      " 기준)\n\n"
+  )
   send_telegram_message(msg_top40_intro)
 
   for chunk_idx, sub_list in enumerate(
@@ -304,14 +299,17 @@ def run_stock_check():
     if not sub_list:
       continue
     table_msg = (
-        f"📊 *TOP 40 순위 ({1 if chunk_idx==1 else 21} ~"
+        f"📋 *TOP 40 순위 ({1 if chunk_idx==1 else 21} ~"
         f" {20 if chunk_idx==1 else 40}위)*\n"
     )
-    table_msg += "`#` | `종목명` | `기관 5일(억)` | `등락률`\n"
-    table_msg += "---|---|---|---\n"
+    table_msg += "`#` | `종목명` | `당일(억)` | `5일(억)` | `시총비율` | `연속` | `등락`\n"
+    table_msg += "---|---|---|---|---|---|---\n"
     for idx, item in enumerate(sub_list, 1):
       real_idx = idx if chunk_idx == 1 else idx + 20
-      table_msg += f"{real_idx} | **{item['name']}** | +{round(item['total_amt_5d'], 1)}억 | {item['change_rate']}%\n"
+      today_mark = (
+          f"+{item['today_amt']}" if item["today_amt"] > 0 else f"{item['today_amt']}"
+      )
+      table_msg += f"{real_idx} | **{item['name']}** | {today_mark} | +{item['total_amt_5d']} | {item['ratio_pct']}% | {item['streak']} | {item['change_rate']}%\n"
     send_telegram_message(table_msg)
 
   print("모든 리포트 전송 완료!")
