@@ -44,7 +44,7 @@ def send_telegram_message(message):
 
 
 def get_target_stocks():
-  """코스피, 코스닥 각 시총 상위 400개 추출 (ETF, ETN, 스팩, 리츠 등 제외 / 우선주 허용)"""
+  """코스피, 코스닥 각 시총 상위 400개 추출 (ETF, ETN, 스팩, 리츠 등 제외 / 우선주 포함)"""
   exclude_keywords = [
       "ETF",
       "ETN",
@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 단기 5일 박스권(23%) + 수정된 조건 1, 2, 3 판정"""
+  """개별 종목 분석 및 단기 5일 박스권(15%) + 수정된 조건 1, 2, 3 판정 (우선주 포함)"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -113,11 +113,11 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # [공통 전체 조건] 5거래일 박스권 범위 23% 이내
+    # [공통 전체 조건] 단기 5거래일 박스권 범위 15% 이내로 타이트하게 설정
     high_max = df_5d["High"].max()
     low_min = df_5d["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
-    is_box = price_range_ratio <= 0.23
+    is_box = price_range_ratio <= 0.15
 
     # [조건 1] 박스권 + 후반부(마지막 3일) 평균이 전반부(처음 2일) 평균보다 30% 이상 증가
     first_2d_mean = df_5d.head(2)["Amount"].mean()
@@ -126,7 +126,7 @@ def process_single_stock(row, start_date_str, end_date_str):
         is_box and (first_2d_mean > 0) and (last_3d_mean >= first_2d_mean * 1.30)
     )
 
-    # [조건 2] 박스권 + 5거래일 중 끊기지 않고 연속으로 증가한 날이 4일 이상
+    # [조건 2] 박스권 + 거래대금이 중간에 끊기지 않고 연속으로 증가한 날이 4일 (5거래일 동안 4번의 변화가 모두 증가)
     amounts = df_5d["Amount"].values
     max_consecutive = 0
     current_streak = 0
@@ -186,7 +186,7 @@ def run_stock_check():
   now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
   print("==================================================")
-  print(f" [정밀 스크리닝 리포트 전송] 실행: {now_str}")
+  print(f" [박스권 15% 강화 정밀 스크리닝] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -194,7 +194,7 @@ def run_stock_check():
     print("대상 종목 리스트를 불러오지 못했습니다.")
     return
 
-  print(f"총 {len(df_krx)}개 종목 병렬 분석 시작...")
+  print(f"총 {len(df_krx)}개 종목 (우선주 포함) 병렬 분석 시작...")
 
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=20)
@@ -233,19 +233,19 @@ def run_stock_check():
       all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
   )[:40]
 
-  # 공통 헤더 생성 함수 (조건별 스크리닝 종목 수 및 중복 충족 강조 표기)
+  # 공통 헤더 생성 함수 (스크리닝 종목 수 및 중복 충족 강조 표기)
   def get_meta_header(target_count):
     return (
         f"📅 *자료 기준일자 및 시간*: `{now_str}`\n"
         f"📌 *출처*: KRX / FinanceDataReader (네이버 금융 연계 추정)\n"
-        f"🔍 *스크리닝 종목수*: 총 `{target_count}개` 발굴\n\n"
+        f"🔍 *스크리닝 종목수*: 총 `{target_count}개` 발굴 (우선주 포함)\n\n"
     )
 
   # -------------------------------------------------------------------------
   # [메시지 1] 조건 1 리포트
   # -------------------------------------------------------------------------
   msg_cond1 = (
-      f"🚀 *[조건 1 부합 리포트: 5일 박스23% + 후반부 30%+ 증가]*\n"
+      f"🚀 *[조건 1 부합 리포트: 5일 박스15% + 후반부 30%+ 증가]*\n"
       f"{get_meta_header(len(cond1_list))}"
   )
   if not cond1_list:
@@ -267,7 +267,7 @@ def run_stock_check():
   # [메시지 2] 조건 2 리포트
   # -------------------------------------------------------------------------
   msg_cond2 = (
-      f"🎯 *[조건 2 부합 리포트: 5일 박스23% + 연속증가 4일 이상]*\n"
+      f"🎯 *[조건 2 부합 리포트: 5일 박스15% + 끊김 없는 연속증가 4일]*\n"
       f"{get_meta_header(len(cond2_list))}"
   )
   if not cond2_list:
@@ -289,7 +289,7 @@ def run_stock_check():
   # [메시지 3] 조건 3 리포트
   # -------------------------------------------------------------------------
   msg_cond3 = (
-      f"⚡ *[조건 3 부합 리포트: 5일 박스23% + 평균대비 2배 폭발 2회 이상]*\n"
+      f"⚡ *[조건 3 부합 리포트: 5일 박스15% + 평균대비 2배 폭발 2회 이상]*\n"
       f"{get_meta_header(len(cond3_list))}"
   )
   if not cond3_list:
@@ -334,7 +334,7 @@ def run_stock_check():
 
       list_msg += f"👑 **{real_idx}. {item['name']}**\n"
       list_msg += f"   💰 5일 순매수: `+{item['total_5d']}억` (시총비율 `{item['ratio_pct']}%`)\n"
-      list_msg += f"   💵 당일 추정금ек: `{today_mark}억` | {item['streak']}\n"
+      list_msg += f"   💵 당일 추정금액: `{today_mark}억` | {item['streak']}\n"
       list_msg += f"   📊 주가 등락률: `{item['change_rate']}%`\n\n"
 
     send_telegram_message(list_msg)
