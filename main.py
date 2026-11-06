@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def get_naver_institutional_detail(ticker, recent_df, marcap):
-  """네이버 금융에서 실제 기관 수급, 연속매수일, 당일추정, 5일누적 파싱"""
+  """네이버 금융 HTML 테이블 파싱 오류 방지 및 정밀 수급 추출"""
   url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
   headers = {
       "User-Agent": (
@@ -99,22 +99,49 @@ def get_naver_institutional_detail(ticker, recent_df, marcap):
     try:
       res = requests.get(url, headers=headers, timeout=5)
       if res.status_code == 200:
-        dfs = pd.read_html(res.text)
+        # 멀티인덱스 헤더 대응을 위해 헤더 두 줄 파싱 시도
+        dfs = pd.read_html(res.text, header=[0, 1])
+        if not dfs:
+          dfs = pd.read_html(res.text)
+
         for df in dfs:
-          cols = [str(c) for c in df.columns]
-          inst_col_candidates = [c for c in cols if "기관" in c]
-          if inst_col_candidates:
-            inst_col = inst_col_candidates[0]
+          # 컬럼명을 문자열로 평탄화
+          if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [
+                "_".join([str(c) for c in col if "Unnamed" not in str(c)])
+                for col in df.columns
+            ]
+          else:
+            df.columns = [str(c) for c in df.columns]
+
+          # '기관' 관련 컬럼 찾기
+          inst_col = None
+          for col in df.columns:
+            if "기관" in col and (
+                "순매매량" in col or "순매수" in col or "거래량" in col
+            ):
+              inst_col = col
+              break
+          if not inst_col:
+            for col in df.columns:
+              if "기관" in col:
+                inst_col = col
+                break
+
+          if inst_col:
             df = df.dropna(subset=[df.columns[0]])
             if len(df) < 5:
               continue
 
             amounts = []
             for i in range(5):
-              row_val = df.iloc[i][inst_col]
-              close_price = recent_df["Close"].iloc[-(5 - i)]
               try:
+                row_val = df.iloc[i][inst_col]
+                close_price = recent_df["Close"].iloc[-(5 - i)]
                 val_str = str(row_val).replace(",", "").strip()
+                if val_str == "" or val_str == "nan":
+                  amounts.append(0.0)
+                  continue
                 shares = (
                     int(val_str[1:])
                     if val_str.startswith("+")
@@ -125,34 +152,33 @@ def get_naver_institutional_detail(ticker, recent_df, marcap):
               except:
                 amounts.append(0.0)
 
-            if not amounts or len(amounts) < 5:
-              return None
+            if len(amounts) == 5:
+              today_amt = amounts[0]
+              total_5d = sum(amounts)
 
-            today_amt = amounts[0]
-            total_5d = sum(amounts)
+              # 연속 매수/매도 계산
+              streak_count = 0
+              is_buying = amounts[0] > 0
+              for a in amounts:
+                if (is_buying and a > 0) or (not is_buying and a < 0):
+                  streak_count += 1
+                else:
+                  break
+              streak_str = (
+                  f"{streak_count}일 매수"
+                  if is_buying
+                  else f"{streak_count}일 매도"
+              )
 
-            # 기관 연속 순매수 계산
-            streak_count = 0
-            is_buying = amounts[0] > 0
-            for a in amounts:
-              if (is_buying and a > 0) or (not is_buying and a < 0):
-                streak_count += 1
-              else:
-                break
-            streak_str = (
-                f"{streak_count}일 매수" if is_buying else f"{streak_count}일 매도"
-            )
+              marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
+              ratio_pct = round((total_5d / marcap_억) * 100, 2)
 
-            # 시총 대비 기관 순매수 %
-            marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
-            ratio_pct = round((total_5d / marcap_억) * 100, 2)
-
-            return {
-                "today_amt": round(today_amt, 1),
-                "total_5d": round(total_5d, 1),
-                "ratio_pct": ratio_pct,
-                "streak": streak_str,
-            }
+              return {
+                  "today_amt": round(today_amt, 1),
+                  "total_5d": round(total_5d, 1),
+                  "ratio_pct": ratio_pct,
+                  "streak": streak_str,
+              }
       time.sleep(0.2)
     except Exception:
       time.sleep(0.3)
@@ -176,11 +202,8 @@ def process_single_stock(row, start_date_str, end_date_str):
     prev_price = df_5d["Close"].iloc[0]
     change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
-    # 1. 10거래일 박스권 범위 23% 이내 검증
     high_max = df_recent["High"].max()
-    low_min = df_recent["High"].min()  # 안전 장치
-    if low_min <= 0:
-      low_min = df_recent["Low"].min()
+    low_min = df_recent["Low"].min()
     if low_min <= 0:
       return None, None
 
@@ -192,8 +215,8 @@ def process_single_stock(row, start_date_str, end_date_str):
     if not naver_data:
       return None, None
 
-    total_10d = naver_data["total_5d"] * 2  # 10일 추정치 대용
-    is_cond1 = True  # 박스권 통과 기본 충족
+    total_10d = naver_data["total_5d"] * 2
+    is_cond1 = True
     is_cond2 = naver_data["total_5d"] > 0
 
     screen_result = None
