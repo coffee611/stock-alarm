@@ -83,8 +83,8 @@ def get_target_stocks():
   return pd.DataFrame()
 
 
-def get_naver_institutional_amount_5days(ticker, recent_df):
-  """네이버 금융에서 최근 5거래일 기관 순매수 금액(억원) 추정 및 분석"""
+def get_naver_institutional_amount_10days(ticker, recent_df):
+  """네이버 금융에서 최근 10거래일 기관 순매수 금액(억원) 추정 및 분석"""
   try:
     url = f"https://finance.naver.com/item/frgn.naver?code={ticker}"
     headers = {
@@ -101,13 +101,13 @@ def get_naver_institutional_amount_5days(ticker, recent_df):
         if inst_col_candidates:
           inst_col = inst_col_candidates[0]
           df = df.dropna(subset=[df.columns[0]])
-          if len(df) < 5:
+          if len(df) < 10:
             continue
 
           amounts = []
-          for i in range(5):
+          for i in range(10):
             row_val = df.iloc[i][inst_col]
-            close_price = recent_df["Close"].iloc[-(5 - i)]
+            close_price = recent_df["Close"].iloc[-(10 - i)]
             try:
               val_str = str(row_val).replace(",", "").strip()
               shares = int(val_str[1:]) if val_str.startswith("+") else int(val_str)
@@ -117,96 +117,111 @@ def get_naver_institutional_amount_5days(ticker, recent_df):
               amounts.append(0.0)
 
           if not amounts:
-            return 0.0, 0.0, 0, []
+            return 0.0, 0.0, 0.0, 0, []
 
           today_amount = amounts[0]
+          total_5d = sum(amounts[:5])
+          total_10d = sum(amounts)
           positive_days = sum(1 for a in amounts if a > 0)
 
-          return today_amount, sum(amounts), positive_days, amounts
+          return today_amount, total_5d, total_10d, positive_days, amounts
   except Exception:
     pass
-  return 0.0, 0.0, 0, []
+  return 0.0, 0.0, 0.0, 0, []
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 데이터를 병렬로 분석하는 함수"""
+  """개별 종목 데이터를 병렬로 분석하는 함수 (10일 기준)"""
   ticker = row["Code"]
   stock_name = row["Name"]
 
   try:
     df = fdr.DataReader(ticker, start_date_str, end_date_str)
-    if len(df) < 5:
-      return None
+    if len(df) < 10:
+      return None, None
 
-    df_recent = df.tail(5)
+    df_recent = df.tail(10)
     latest_price = df_recent["Close"].iloc[-1]
+    prev_price = df_recent["Close"].iloc[0]
+    change_rate = round(((latest_price - prev_price) / prev_price) * 100, 1)
 
-    # 1. 공통 전제 조건: 최근 5거래일 박스권 범위 23% 이내
+    # 1. 공통 전제 조건: 최근 10거래일 박스권 범위 23% 이내
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     if low_min <= 0:
-      return None
+      return None, None
 
     price_range_ratio = (high_max - low_min) / low_min
     if price_range_ratio > 0.23:
-      return None
+      return None, None
 
-    today_amt, total_amt_5d, positive_days, daily_amounts = (
-        get_naver_institutional_amount_5days(ticker, df_recent)
+    today_amt, total_amt_5d, total_amt_10d, positive_days, daily_amounts = (
+        get_naver_institutional_amount_10days(ticker, df_recent)
     )
-    if not daily_amounts or len(daily_amounts) < 5:
-      return None
+    if not daily_amounts or len(daily_amounts) < 10:
+      return None, None
 
-    # 5일 데이터 분할 (전반 2일 vs 후반 3일)
-    first_half_avg = sum(daily_amounts[:2]) / 2.0
-    second_half_avg = sum(daily_amounts[2:]) / 3.0
+    # 10일 데이터 분할 (전반 5일 vs 후반 5일)
+    first_half_avg = sum(daily_amounts[5:]) / 5.0
+    second_half_avg = sum(daily_amounts[:5]) / 5.0
     growth_ratio = (
         (second_half_avg - first_half_avg) / abs(first_half_avg)
         if first_half_avg != 0
         else 0
     )
 
-    mean_amt = sum(daily_amounts) / 5.0
+    mean_amt = sum(daily_amounts) / 10.0
     spike_count = sum(
         1 for a in daily_amounts if mean_amt > 0 and a >= mean_amt * 2.0
     )
 
-    # 조건 검증 (박스권 23%, 후반부 20% 증가, 3일 이상 순매수 유입, 2배 폭발 2회 이상)
     is_cond1 = growth_ratio >= 0.20
-    is_cond2 = positive_days >= 3
+    is_cond2 = positive_days >= 6
     is_cond3 = spike_count >= 2
 
+    screen_result = None
     if is_cond1 or is_cond2 or is_cond3:
       matched_tags = []
       if is_cond1:
-        matched_tags.append("📦후반증가")
+        matched_tags.append("후반증가")
       if is_cond2:
-        matched_tags.append("📈연속매집")
+        matched_tags.append("연속매집")
       if is_cond3:
-        matched_tags.append("⚡자금폭발")
+        matched_tags.append("자금폭발")
 
-      return {
+      screen_result = {
           "ticker": ticker,
           "name": stock_name,
           "price": latest_price,
           "box_ratio": round(price_range_ratio * 100, 1),
           "today_amt": today_amt,
-          "total_amt_5d": total_amt_5d,
+          "total_amt_10d": total_amt_10d,
           "positive_days": positive_days,
-          "tags": " ".join(matched_tags),
+          "change_rate": change_rate,
+          "tags": ",".join(matched_tags),
       }
+
+    top40_data = {
+        "ticker": ticker,
+        "name": stock_name,
+        "price": latest_price,
+        "total_amt_5d": total_amt_5d,
+        "today_amt": today_amt,
+        "positive_days": positive_days,
+        "change_rate": change_rate,
+    }
+
+    return screen_result, top40_data
+
   except Exception:
     pass
-  return None
+  return None, None
 
 
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(
-      f" [병렬 스캔] 단기 5일 박스권(23%) + 우선주 포함 + 기관 수급 정렬 스크리닝"
-      f" 실행: {now_str}"
-  )
+  print(f" [병렬 스캔] 10일 박스권 + 통합 테이블 및 TOP 40 리포트 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -214,20 +229,14 @@ def run_stock_check():
     print("대상 종목 리스트를 불러오지 못했습니다.")
     return
 
-  print(
-      f"총 필터링된 타겟 종목 수: {len(df_krx)}개 (우선주 포함, 코스피/코스닥"
-      " 각 상위 400개)"
-  )
-
   end_date_dt = datetime.datetime.now()
-  start_date_dt = end_date_dt - datetime.timedelta(days=20)
+  start_date_dt = end_date_dt - datetime.timedelta(days=30)
   start_date_str = start_date_dt.strftime("%Y-%m-%d")
   end_date_str = end_date_dt.strftime("%Y-%m-%d")
 
-  results = []
+  screened_results = []
+  all_top40_data = []
 
-  # 멀티스레딩(ThreadPoolExecutor)을 통한 고속 병렬 처리
-  print("ThreadPoolExecutor 병렬 스캔 시작...")
   with ThreadPoolExecutor(max_workers=15) as executor:
     futures = [
         executor.submit(
@@ -236,52 +245,60 @@ def run_stock_check():
         for _, row in df_krx.iterrows()
     ]
     for future in as_completed(futures):
-      res = future.result()
-      if res:
-        results.append(res)
+      screen_res, top40_res = future.result()
+      if screen_res:
+        screened_results.append(screen_res)
+      if top40_res:
+        all_top40_data.append(top40_res)
 
-  # 정렬 기준: 기관 순매수 5일 누적 금액 큰 순으로 정렬 (내림차순)
-  results = sorted(results, key=lambda x: x["total_amt_5d"], reverse=True)
-
-  # 시인성을 높인 리포트 작성 및 전송
-  msg_intro = (
-      f"📊 *[단기 5일 박스권(23%) + 우선주 포함 + 기관 수급 TOP 리포트]*\n"
-      f"⏱️ 실행 시간: `{now_str}` (고속 멀티스레딩 적용)\n"
-      f"🎯 정렬 기준: **기관 5일 누적 순매수 금액 큰 순**\n"
-      f"────────────────────────"
+  # -------------------------------------------------------------------------
+  # [메시지 1] 조건 1, 2, 3 부합 종목 통합 테이블 리포트
+  # -------------------------------------------------------------------------
+  screened_results = sorted(
+      screened_results, key=lambda x: x["total_amt_10d"], reverse=True
   )
-  send_telegram_message(msg_intro)
 
-  if not results:
-    send_telegram_message(
-        "❌ 조건을 만족하는 종목이 없습니다 (엄격한 수급 필터 적용 중)."
-    )
+  msg_screen = (
+      f"📊 *[10일 박스권 수급 스크리닝 (조건 1,2,3 통합)]*\n"
+      f"⏱️ `{now_str}` (10일 누적 순매수순)\n\n"
+  )
+  if not screened_results:
+    msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
+    send_telegram_message(msg_screen)
   else:
-    chunk_msg = "🏆 *기관 순매수 상위 스크리닝 결과 (우선주 포함)*\n\n"
-    for idx, item in enumerate(results, 1):
-      today_mark = (
-          f"🔥 +{round(item['today_amt'], 1)}억"
-          if item["today_amt"] > 0
-          else f"💤 {round(item['today_amt'], 1)}억"
-      )
+    # 텔레그램 메시지 길이 제한을 고려하여 상위 30개 종목을 하나의 표로 전송
+    msg_screen += "`종목명` | `10일누적` | `등락률` | `부합조건`\n"
+    msg_screen += "---|---|---|---\n"
+    for item in screened_results[:30]:
+      msg_screen += f"**{item['name']}** | +{round(item['total_amt_10d'], 1)}억 | {item['change_rate']}% | `{item['tags']}`\n"
+    send_telegram_message(msg_screen)
 
-      line = (
-          f"*{idx}. {item['name']}* (`{item['ticker']}`)\n"
-          f" • 현재가: `{item['price']:,}원` (변동폭: {item['box_ratio']}%)\n"
-          f" • 5일 누적: `+{round(item['total_amt_5d'], 1)}억`"
-          f" ({item['positive_days']}/5일 유입)\n"
-          f" • 당일 추정: {today_mark}\n"
-          f" • 부합 조건: `{item['tags']}`\n\n"
-      )
+  # -------------------------------------------------------------------------
+  # [메시지 2] 기관 5일 순매수 금액 TOP 40 리포트 (테이블 형식)
+  # -------------------------------------------------------------------------
+  all_top40_data = sorted(
+      all_top40_data, key=lambda x: x["total_amt_5d"], reverse=True
+  )
+  top_40_list = all_top40_data[:40]
 
-      if len(chunk_msg) + len(line) > 3800:
-        send_telegram_message(chunk_msg)
-        chunk_msg = ""
+  msg_top40_intro = f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
+  send_telegram_message(msg_top40_intro)
 
-      chunk_msg += line
-
-    if chunk_msg:
-      send_telegram_message(chunk_msg)
+  for chunk_idx, sub_list in enumerate(
+      [top_40_list[:20], top_40_list[20:40]], 1
+  ):
+    if not sub_list:
+      continue
+    table_msg = (
+        f"📊 *TOP 40 순위 ({1 if chunk_idx==1 else 21} ~"
+        f" {20 if chunk_idx==1 else 40}위)*\n"
+    )
+    table_msg += "`#` | `종목명` | `기관 5일(억)` | `등락률`\n"
+    table_msg += "---|---|---|---\n"
+    for idx, item in enumerate(sub_list, 1):
+      real_idx = idx if chunk_idx == 1 else idx + 20
+      table_msg += f"{real_idx} | **{item['name']}** | +{round(item['total_amt_5d'], 1)}억 | {item['change_rate']}%\n"
+    send_telegram_message(table_msg)
 
   print("모든 리포트 전송 완료!")
   print("==================================================")
