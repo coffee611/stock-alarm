@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 강화된 조건(박스권 15%, 조건1 25%, 조건2 4일, 조건3 2회) 판정"""
+  """개별 종목 분석 및 박스권 15%, 조건1 25%, 조건2 4일, 조건3 2회 판정"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -113,7 +113,7 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # [공통 조건] 10거래일 박스권 범위 15% 이내로 축소
+    # [공통 조건] 10거래일 박스권 범위 15% 이내
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
@@ -176,10 +176,9 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_dt = datetime.datetime.now()
   now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-  data_date_str = now_dt.strftime("%Y-%m-%d")
 
   print("==================================================")
-  print(f" [고강도 정밀 리포트] 실행: {now_str}")
+  print(f" [최종 리포트 전송] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -206,7 +205,10 @@ def run_stock_check():
       if res:
         all_analyzed_stocks.append(res)
 
-  source_info = "📌 *출처*: KRX / FinanceDataReader (네이버 금융 연계 추정)"
+  meta_header = (
+      f"📅 *자료 기준일자 및 시간*: `{now_str}`\n"
+      f"📌 *출처*: KRX / FinanceDataReader (네이버 금융 연계 추정)\n\n"
+  )
 
   # -------------------------------------------------------------------------
   # [메시지 1] 조건 1 리포트 (투자의견 포함)
@@ -218,8 +220,7 @@ def run_stock_check():
   )
   msg_cond1 = (
       f"🚀 *[조건 1 부합 리포트: 박스권15% + 후반부 평균 25%+ 증가]*\n"
-      f"📅 *기준일자*: `{data_date_str}`\n"
-      f"{source_info}\n\n"
+      f"{meta_header}"
   )
   if not cond1_list:
     msg_cond1 += "❌ 조건을 만족하는 종목이 없습니다."
@@ -241,8 +242,7 @@ def run_stock_check():
   )
   msg_cond2 = (
       f"🎯 *[조건 2 부합 리포트: 박스권15% + 5일중 증가일 4일 이상]*\n"
-      f"📅 *기준일자*: `{data_date_str}`\n"
-      f"{source_info}\n\n"
+      f"{meta_header}"
   )
   if not cond2_list:
     msg_cond2 += "❌ 조건을 만족하는 종목이 없습니다."
@@ -264,8 +264,7 @@ def run_stock_check():
   )
   msg_cond3 = (
       f"⚡ *[조건 3 부합 리포트: 박스권15% + 평균대비 2배 폭발 2회 이상]*\n"
-      f"📅 *기준일자*: `{data_date_str}`\n"
-      f"{source_info}\n\n"
+      f"{meta_header}"
   )
   if not cond3_list:
     msg_cond3 += "❌ 조건을 만족하는 종목이 없습니다."
@@ -278,7 +277,7 @@ def run_stock_check():
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (조건 및 투자의견 없이 순수 데이터만)
+  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (순수 데이터만, 투자의견 제외)
   # -------------------------------------------------------------------------
   top40_list = sorted(
       all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
@@ -286,8 +285,7 @@ def run_stock_check():
 
   msg_top40_intro = (
       f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n"
-      f"📅 *기준일자*: `{data_date_str}`\n"
-      f"{source_info}\n\n"
+      f"{meta_header}"
   )
   send_telegram_message(msg_top40_intro)
   time.sleep(0.5)
