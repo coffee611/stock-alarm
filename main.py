@@ -85,7 +85,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 (안정적인 순차 처리 및 딜레이 적용)"""
+  """개별 종목 분석"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -121,7 +121,7 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    streak_str = "5일 매수" if change_rate >= 0 else "3일 매도"
+    streak_str = "5일 연속매수" if change_rate >= 0 else "3일 연속매도"
 
     screen_result = {
         "name": stock_name,
@@ -152,7 +152,7 @@ def process_single_stock(row, start_date_str, end_date_str):
 def run_stock_check():
   now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   print("==================================================")
-  print(f" [안정 순차 스캔] 분할 리포트 실행: {now_str}")
+  print(f" [초고가독성 리포트] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -160,7 +160,7 @@ def run_stock_check():
     print("대상 종목 리스트를 불러오지 못했습니다.")
     return
 
-  print(f"총 {len(df_krx)}개 종목 순차 분석 시작 (차단 방지 딜레이 적용)...")
+  print(f"총 {len(df_krx)}개 종목 순차 분석 시작...")
 
   end_date_dt = datetime.datetime.now()
   start_date_dt = end_date_dt - datetime.timedelta(days=30)
@@ -170,7 +170,6 @@ def run_stock_check():
   screened_results = []
   all_top40_data = []
 
-  # 병렬 처리 대신 순차 처리 + 짧은 딜레이(0.1초)로 서버 부하 및 누락 원천 차단
   for _, row in df_krx.iterrows():
     screen_res, top40_res = process_single_stock(
         row, start_date_str, end_date_str
@@ -182,7 +181,7 @@ def run_stock_check():
     time.sleep(0.1)
 
   # -------------------------------------------------------------------------
-  # [메시지 1] 조건 스크리닝 결과 (별도 전송)
+  # [메시지 1] 조건 스크리닝 결과
   # -------------------------------------------------------------------------
   screened_results = sorted(
       screened_results, key=lambda x: x["total_amt_10d"], reverse=True
@@ -195,23 +194,20 @@ def run_stock_check():
     msg_screen += "❌ 조건을 만족하는 종목이 없습니다."
     send_telegram_message(msg_screen)
   else:
-    msg_screen += "`종목명` | `누적금액` | `등락률` | `부합조건`\n"
-    msg_screen += "---|---|---|---\n"
     for item in screened_results[:25]:
-      msg_screen += f"**{item['name']}** | +{item['total_amt_10d']}억 | {item['change_rate']}% | `{item['tags']}`\n"
+      msg_screen += f"• **{item['name']}** | 누적 +{item['total_amt_10d']}억 | 등락 `{item['change_rate']}%` | `{item['tags']}`\n"
     send_telegram_message(msg_screen)
 
   # -------------------------------------------------------------------------
-  # [메시지 2 & 3] 기관 5일 순매수 금액 TOP 40 리포트 (별도 전송, 20개씩 분할)
+  # [메시지 2 & 3] 기관 5일 순매수 금액 TOP 40 리포트 (최고 시인성 블록 포맷)
   # -------------------------------------------------------------------------
   all_top40_data = sorted(
-      all_top40_data, key=lambda x: x["total_amt_5d"], reverse=True
+      all_top40_data, key=lambda x: x["total_5d"], reverse=True
   )
   top_40_list = all_top40_data[:40]
 
   msg_top40_intro = (
-      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}` (안정 순차"
-      " 기준)\n\n"
+      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
   )
   send_telegram_message(msg_top40_intro)
 
@@ -220,19 +216,23 @@ def run_stock_check():
   ):
     if not sub_list:
       continue
-    table_msg = (
+    list_msg = (
         f"📋 *TOP 40 순위 ({1 if chunk_idx==1 else 21} ~"
-        f" {20 if chunk_idx==1 else 40}위)*\n"
+        f" {20 if chunk_idx==1 else 40}위)*\n\n"
     )
-    table_msg += "`#` | `종목명` | `당일(억)` | `5일(억)` | `시총비율` | `연속` | `등락`\n"
-    table_msg += "---|---|---|---|---|---|---\n"
     for idx, item in enumerate(sub_list, 1):
       real_idx = idx if chunk_idx == 1 else idx + 20
       today_mark = (
           f"+{item['today_amt']}" if item["today_amt"] > 0 else f"{item['today_amt']}"
       )
-      table_msg += f"{real_idx} | **{item['name']}** | {today_mark} | +{item['total_amt_5d']} | {item['ratio_pct']}% | {item['streak']} | {item['change_rate']}%\n"
-    send_telegram_message(table_msg)
+      
+      # 모바일 가독성을 극대화한 블록형 리스트 디자인
+      list_msg += f"🔹 **{real_idx}. {item['name']}**\n"
+      list_msg += f"   ▪️ 5일 순매수: `+{item['total_5d']}억` (시총비율 `{item['ratio_pct']}%`)\n"
+      list_msg += f"   ▪️ 당일 추정금액: `{today_mark}억` | 연속: `{item['streak']}`\n"
+      list_msg += f"   ▪️ 주가 등락률: `{item['change_rate']}%`\n\n"
+      
+    send_telegram_message(list_msg)
 
   print("모든 리포트 전송 완료!")
   print("==================================================")
