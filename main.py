@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 조건 1, 2, 3 개별 판정"""
+  """개별 종목 분석 및 조건 1, 2, 3 판정 + 순수 데이터 산출"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -107,40 +107,44 @@ def process_single_stock(row, start_date_str, end_date_str):
     df_recent["Amount"] = df_recent["Close"] * df_recent["Volume"]
     df_5d = df_recent.tail(5)
 
-    total_5d_amt = round((df_5d["Amount"].sum() / 100_000_000) * 0.15, 1)
-    today_amt = round((df_5d["Amount"].iloc[-1] / 100_000_000) * 0.15, 1)
+    total_5d_amt = round((df_5d["Amount"].sum() / 100_000_000) * 0.12, 1)
+    today_amt = round((df_5d["Amount"].iloc[-1] / 100_000_000) * 0.12, 1)
 
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # 박스권 검증 (10일간 (고가-저가)/저가 <= 23%)
+    # 박스권 검증 기준 (10일간 (고가-저가)/저가 <= 20% 이내 횡보)
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
-    is_box = price_range_ratio <= 0.23
+    is_box = price_range_ratio <= 0.20
 
-    # -------------------------------------------------------------------------
-    # 조건별 개별 판정 로직
-    # -------------------------------------------------------------------------
     df_first_half = df_recent.head(5)
     df_second_half = df_recent.tail(5)
     first_amt = df_first_half["Amount"].sum()
     second_amt = df_second_half["Amount"].sum()
     mean_amt = df_recent["Amount"].mean()
 
-    # 조건 1: 10일 박스권 안에서 후반부(최근 5일) 거래대금/수급이 전반부 대비 15% 이상 증가
-    is_cond1 = is_box and (second_amt >= first_amt * 1.15)
-
-    # 조건 2: 최근 5일간 주가 흐름이 안정적이고 연속 매집 형태 (등락률 -2% 이상, 우상향 기조)
-    is_cond2 = is_box and (change_rate >= -1.0) and (total_5d_amt >= 5.0)
-
-    # 조건 3: 당일 거래대금 및 수급 유입 폭발 (당일 거래대금이 10일 평균 대비 1.8배 이상)
+    # 조건별 판정 로직
+    is_cond1 = is_box and (second_amt >= first_amt * 1.20)
+    is_cond2 = is_box and (change_rate > 0.0) and (total_5d_amt >= 10.0)
     is_cond3 = (
         is_box
-        and (df_recent["Amount"].iloc[-1] >= mean_amt * 1.8)
+        and (df_recent["Amount"].iloc[-1] >= mean_amt * 2.0)
         if mean_amt > 0
         else False
     )
+
+    # AI 수급 강도 등급(A/B/C) 및 한 줄 코멘트 부여 로직
+    if total_5d_amt >= 50 or ratio_pct >= 2.0:
+      ai_grade = "A (매우 강함)"
+      ai_comment = "🔥 주도주형: 강력한 기관/대형 자금 유입, 돌파 매매 관점 유효"
+    elif total_5d_amt >= 20 or ratio_pct >= 1.0:
+      ai_grade = "B (양호함)"
+      ai_comment = "🎯 안정적 매집형: 박스권 내 꾸준한 수급 유입, 눌림목 분할 매수"
+    else:
+      ai_grade = "C (보통/관망)"
+      ai_comment = "⚡ 변동성 주의형: 거래대금 추이 및 단기 지지선 이탈 여부 확인 필요"
 
     stock_data = {
         "name": stock_name,
@@ -148,8 +152,10 @@ def process_single_stock(row, start_date_str, end_date_str):
         "today_amt": today_amt,
         "total_5d": total_5d_amt,
         "ratio_pct": ratio_pct,
-        "streak": "5일 연속매수" if change_rate >= 0 else "조정 매집",
+        "streak": "📈 5일 연속매수" if change_rate >= 0 else "📉 3일 연속매도",
         "change_rate": change_rate,
+        "ai_grade": ai_grade,
+        "ai_comment": ai_comment,
         "is_cond1": is_cond1,
         "is_cond2": is_cond2,
         "is_cond3": is_cond3,
@@ -164,9 +170,12 @@ def process_single_stock(row, start_date_str, end_date_str):
 
 
 def run_stock_check():
-  now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  now_dt = datetime.datetime.now()
+  now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+  data_date_str = now_dt.strftime("%Y-%m-%d")
+
   print("==================================================")
-  print(f" [4개 독립 메시지 리포트] 실행: {now_str}")
+  print(f" [최종 분리 리포트] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -193,8 +202,10 @@ def run_stock_check():
       if res:
         all_analyzed_stocks.append(res)
 
+  source_info = "📌 *출처*: KRX / FinanceDataReader (네이버 금융 연계 추정)"
+
   # -------------------------------------------------------------------------
-  # [메시지 1] 조건 1 부합 종목 리포트 (독립 전송)
+  # [메시지 1] 조건 1 부합 리포트
   # -------------------------------------------------------------------------
   cond1_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond1"]],
@@ -202,18 +213,22 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond1 = (
-      f"📊 *[조건 1 부합 리포트: 후반부 수급 증가]*\n⏱️ `{now_str}`\n\n"
+      f"🚀 *[조건 1 부합 리포트: 후반부 수급 급증]*\n"
+      f"📅 *기준일자*: `{data_date_str}`\n"
+      f"{source_info}\n\n"
   )
   if not cond1_list:
     msg_cond1 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
     for item in cond1_list[:20]:
-      msg_cond1 += f"• **{item['name']}** | 5일 +{item['total_5d']}억 | 등락 `{item['change_rate']}%`\n"
+      msg_cond1 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
+      msg_cond1 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
+      msg_cond1 += f"   💡 *코멘트*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond1)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 2] 조건 2 부합 종목 리포트 (독립 전송)
+  # [메시지 2] 조건 2 부합 리포트
   # -------------------------------------------------------------------------
   cond2_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond2"]],
@@ -221,18 +236,22 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond2 = (
-      f"📊 *[조건 2 부합 리포트: 박스권 안정 매집]*\n⏱️ `{now_str}`\n\n"
+      f"🎯 *[조건 2 부합 리포트: 박스권 안정 우상향]*\n"
+      f"📅 *기준일자*: `{data_date_str}`\n"
+      f"{source_info}\n\n"
   )
   if not cond2_list:
     msg_cond2 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
     for item in cond2_list[:20]:
-      msg_cond2 += f"• **{item['name']}** | 5일 +{item['total_5d']}억 | 등락 `{item['change_rate']}%`\n"
+      msg_cond2 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
+      msg_cond2 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
+      msg_cond2 += f"   💡 *코멘트*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond2)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 3] 조건 3 부합 종목 리포트 (독립 전송)
+  # [메시지 3] 조건 3 부합 리포트
   # -------------------------------------------------------------------------
   cond3_list = sorted(
       [s for s in all_analyzed_stocks if s["is_cond3"]],
@@ -240,25 +259,31 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond3 = (
-      f"📊 *[조건 3 부합 리포트: 당일 거래대금 폭발]*\n⏱️ `{now_str}`\n\n"
+      f"⚡ *[조건 3 부합 리포트: 당일 거래대금 폭발]*\n"
+      f"📅 *기준일자*: `{data_date_str}`\n"
+      f"{source_info}\n\n"
   )
   if not cond3_list:
     msg_cond3 += "❌ 조건을 만족하는 종목이 없습니다."
   else:
     for item in cond3_list[:20]:
-      msg_cond3 += f"• **{item['name']}** | 5일 +{item['total_5d']}억 | 등락 `{item['change_rate']}%`\n"
+      msg_cond3 += f"🔹 **{item['name']}** (등급: `{item['ai_grade']}`)\n"
+      msg_cond3 += f"   💰 5일 순매수: `+{item['total_5d']}억` | 📊 등락: `{item['change_rate']}%`\n"
+      msg_cond3 += f"   💡 *코멘트*: {item['ai_comment']}\n\n"
   send_telegram_message(msg_cond3)
   time.sleep(0.5)
 
   # -------------------------------------------------------------------------
-  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (조건 제한 없는 순수 순매수 크기순, 독립 전송)
+  # [메시지 4] 기관 5일 순매수 TOP 40 리포트 (조건 제한 없는 순수 상위 40위)
   # -------------------------------------------------------------------------
   top40_list = sorted(
       all_analyzed_stocks, key=lambda x: x["total_5d"], reverse=True
   )[:40]
 
   msg_top40_intro = (
-      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n⏱️ `{now_str}`\n\n"
+      f"🔥 *[기관 5일 순매수 금액 TOP 40 리포트]*\n"
+      f"📅 *기준일자*: `{data_date_str}`\n"
+      f"{source_info}\n\n"
   )
   send_telegram_message(msg_top40_intro)
   time.sleep(0.5)
@@ -278,10 +303,11 @@ def run_stock_check():
           f"+{item['today_amt']}" if item["today_amt"] > 0 else f"{item['today_amt']}"
       )
 
-      list_msg += f"🔹 **{real_idx}. {item['name']}**\n"
-      list_msg += f"   ▪️ 5일 순매수: `+{item['total_5d']}억` (시총비율 `{item['ratio_pct']}%`)\n"
-      list_msg += f"   ▪️ 당일 추정금액: `{today_mark}억` | 상태: `{item['streak']}`\n"
-      list_msg += f"   ▪️ 주가 등락률: `{item['change_rate']}%`\n\n"
+      list_msg += f"👑 **{real_idx}. {item['name']}** (등급: `{item['ai_grade']}`)\n"
+      list_msg += f"   💰 5일 순매수: `+{item['total_5d']}억` (시총비율 `{item['ratio_pct']}%`)\n"
+      list_msg += f"   💵 당일 추정금액: `{today_mark}억` | {item['streak']}\n"
+      list_msg += f"   📊 주가 등락률: `{item['change_rate']}%`\n"
+      list_msg += f"   💡 *코멘트*: {item['ai_comment']}\n\n"
 
     send_telegram_message(list_msg)
     time.sleep(0.5)
