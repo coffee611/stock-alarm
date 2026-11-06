@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 공통 박스권 조건 + 조건 1, 2, 3 정밀 판정"""
+  """개별 종목 분석 및 강화된 조건(박스권 15%, 조건1 25%, 조건2 4일, 조건3 2회) 판정"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -113,26 +113,26 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # [공통 조건] 10거래일 박스권 범위 20% 이내
+    # [공통 조건] 10거래일 박스권 범위 15% 이내로 축소
     high_max = df_recent["High"].max()
     low_min = df_recent["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
-    is_box = price_range_ratio <= 0.20
+    is_box = price_range_ratio <= 0.15
 
     df_first_half = df_recent.head(5)
     df_second_half = df_recent.tail(5)
 
-    # [조건 1] 박스권 + 후반부 5일 평균이 전반부 5일 평균보다 15% 이상 증가
+    # [조건 1] 박스권 + 후반부 5일 평균이 전반부 5일 평균보다 25% 이상 증가
     first_mean = df_first_half["Amount"].mean()
     second_mean = df_second_half["Amount"].mean()
     is_cond1 = (
-        is_box and (first_mean > 0) and (second_mean >= first_mean * 1.15)
+        is_box and (first_mean > 0) and (second_mean >= first_mean * 1.25)
     )
 
-    # [조건 2] 박스권 + 5거래일 중 전일 대비 증가한 날이 3일 이상
+    # [조건 2] 박스권 + 5거래일 중 전일 대비 증가한 날이 4일 이상
     amount_diff = df_5d["Amount"].diff().dropna()
     days_increased = (amount_diff > 0).sum()
-    is_cond2 = is_box and (days_increased >= 3)
+    is_cond2 = is_box and (days_increased >= 4)
 
     # [조건 3] 박스권 + 5일 평균 대비 2배 이상 터진 날이 2회 이상 존재
     mean_5d_amt = df_5d["Amount"].mean()
@@ -179,7 +179,7 @@ def run_stock_check():
   data_date_str = now_dt.strftime("%Y-%m-%d")
 
   print("==================================================")
-  print(f" [최종 정밀 리포트] 실행: {now_str}")
+  print(f" [고강도 정밀 리포트] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -217,7 +217,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond1 = (
-      f"🚀 *[조건 1 부합 리포트: 박스권 + 후반부 평균 15%+ 증가]*\n"
+      f"🚀 *[조건 1 부합 리포트: 박스권15% + 후반부 평균 25%+ 증가]*\n"
       f"📅 *기준일자*: `{data_date_str}`\n"
       f"{source_info}\n\n"
   )
@@ -240,7 +240,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond2 = (
-      f"🎯 *[조건 2 부합 리포트: 박스권 + 5일중 증가일 3일 이상]*\n"
+      f"🎯 *[조건 2 부합 리포트: 박스권15% + 5일중 증가일 4일 이상]*\n"
       f"📅 *기준일자*: `{data_date_str}`\n"
       f"{source_info}\n\n"
   )
@@ -263,7 +263,7 @@ def run_stock_check():
       reverse=True,
   )
   msg_cond3 = (
-      f"⚡ *[조건 3 부합 리포트: 박스권 + 평균대비 2배 폭발 2회 이상]*\n"
+      f"⚡ *[조건 3 부합 리포트: 박스권15% + 평균대비 2배 폭발 2회 이상]*\n"
       f"📅 *기준일자*: `{data_date_str}`\n"
       f"{source_info}\n\n"
   )
