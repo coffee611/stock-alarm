@@ -86,7 +86,7 @@ def get_target_stocks():
 
 
 def process_single_stock(row, start_date_str, end_date_str):
-  """개별 종목 분석 및 단기 5일 박스권(15%) + 조건 1(30%), 조건2(연속4일), 조건3(2배 2회) 판정"""
+  """개별 종목 분석 및 단기 5일 박스권(10%) + 조건 1(35%), 조건2(연속 4일), 조건3(2배 1회) 판정"""
   ticker = row["Code"]
   stock_name = row["Name"]
   marcap = row.get("MarCap", 0)
@@ -113,20 +113,20 @@ def process_single_stock(row, start_date_str, end_date_str):
     marcap_억 = marcap / 100_000_000 if marcap > 0 else 1
     ratio_pct = round((total_5d_amt / marcap_억) * 100, 2)
 
-    # [공통 전체 조건] 단기 5거래일 박스권 범위 15% 이내
+    # [공통 전체 조건] 단기 5거래일 박스권 범위 10% 이내 (타이트한 횡보/밀집 구간)
     high_max = df_5d["High"].max()
     low_min = df_5d["Low"].min()
     price_range_ratio = (high_max - low_min) / low_min if low_min > 0 else 999
-    is_box = price_range_ratio <= 0.15
+    is_box = price_range_ratio <= 0.10
 
-    # [조건 1] 박스권 + 후반부(마지막 3일) 평균이 전반부(처음 2일) 평균보다 30% 이상 증가
+    # [조건 1] 박스권 + 후반부(마지막 3일) 평균이 전반부(처음 2일) 평균보다 35% 이상 증가
     first_2d_mean = df_5d.head(2)["Amount"].mean()
     last_3d_mean = df_5d.tail(3)["Amount"].mean()
     is_cond1 = (
-        is_box and (first_2d_mean > 0) and (last_3d_mean >= first_2d_mean * 1.30)
+        is_box and (first_2d_mean > 0) and (last_3d_mean >= first_2d_mean * 1.35)
     )
 
-    # [조건 2] 박스권 + 거래대금이 중간에 끊기지 않고 연속으로 증가한 날이 4일 (5거래일 동안 4번 모두 증가)
+    # [조건 2] 박스권 + 거래대금이 중간에 끊기지 않고 연속으로 증가한 날이 4일 이상 (5거래일 동안 4번 모두 증가)
     amounts = df_5d["Amount"].values
     max_consecutive = 0
     current_streak = 0
@@ -138,10 +138,10 @@ def process_single_stock(row, start_date_str, end_date_str):
       max_consecutive = max(max_consecutive, current_streak)
     is_cond2 = is_box and (max_consecutive >= 4)
 
-    # [조건 3] 박스권 + 5일 평균 대비 2배 이상 터진 날이 2회 이상 존재
+    # [조건 3] 박스권 + 5일 평균 대비 2배 이상 터진 날이 1회 이상 존재
     mean_5d_amt = df_5d["Amount"].mean()
     high_vol_days = (df_5d["Amount"] >= (mean_5d_amt * 2.0)).sum()
-    is_cond3 = is_box and (high_vol_days >= 2)
+    is_cond3 = is_box and (high_vol_days >= 1)
 
     # AI 수급 강도 등급(A/B/C) 및 한 줄 코멘트
     if total_5d_amt >= 50 or ratio_pct >= 2.0:
@@ -182,7 +182,7 @@ def run_stock_check():
   now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
   print("==================================================")
-  print(f" [단기 박스권 15% 정밀 스크리닝] 실행: {now_str}")
+  print(f" [단기 박스권 10% 정밀 스크리닝 리포트 전송] 실행: {now_str}")
   print("==================================================")
 
   df_krx = get_target_stocks()
@@ -243,7 +243,7 @@ def run_stock_check():
   # [메시지 1] 조건 1 리포트
   # -------------------------------------------------------------------------
   msg_cond1 = (
-      f"🚀 *[조건 1 부합 리포트: 5일 박스15% + 후반부 30%+ 증가]*\n"
+      f"🚀 *[조건 1 부합 리포트: 5일 박스10% + 후반부 35%+ 증가]*\n"
       f"{get_meta_header(len(cond1_list))}"
   )
   if not cond1_list:
@@ -260,7 +260,7 @@ def run_stock_check():
   # [메시지 2] 조건 2 리포트
   # -------------------------------------------------------------------------
   msg_cond2 = (
-      f"🎯 *[조건 2 부합 리포트: 5일 박스15% + 연속증가 4일]*\n"
+      f"🎯 *[조건 2 부합 리포트: 5일 박스10% + 연속증가 4일 이상]*\n"
       f"{get_meta_header(len(cond2_list))}"
   )
   if not cond2_list:
@@ -277,7 +277,7 @@ def run_stock_check():
   # [메시지 3] 조건 3 리포트
   # -------------------------------------------------------------------------
   msg_cond3 = (
-      f"⚡ *[조건 3 부합 리포트: 5일 박스15% + 평균대비 2배 폭발 2회 이상]*\n"
+      f"⚡ *[조건 3 부합 리포트: 5일 박스10% + 평균대비 2배 폭발 1회 이상]*\n"
       f"{get_meta_header(len(cond3_list))}"
   )
   if not cond3_list:
