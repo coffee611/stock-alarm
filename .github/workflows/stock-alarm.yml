@@ -1,11 +1,13 @@
-- name: Run Stock Alarm
-  run: python stock-alarm/stock_alarm.py
+
+name: Stock Alarm
+
 on:
   schedule:
     # 한국시간 오전 11:30
     - cron: '30 2 * * 1-5'
     # 한국시간 오후 18:50
     - cron: '50 9 * * 1-5'
+
   workflow_dispatch:
     inputs:
       mode:
@@ -17,20 +19,6 @@ on:
           - probe
           - main
           - intraday
-      data_source:
-        description: '데이터 출처'
-        type: choice
-        required: true
-        default: auto
-        options:
-          - auto
-          - krx
-          - naver
-          - naver_first
-      force:
-        description: '휴장일 검사 생략'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -40,27 +28,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scan:
+  stock-alarm:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+
     env:
       TZ: Asia/Seoul
       TG_TOKEN: ${{ secrets.TG_TOKEN }}
       TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       KRX_ID: ${{ secrets.KRX_ID }}
       KRX_PW: ${{ secrets.KRX_PW }}
-      DATA_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.data_source || 'auto' }}
-      FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
+      DATA_SOURCE: auto
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
 
       - name: Install Korean fonts
         run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-nanum fonts-noto-cjk
@@ -68,30 +55,40 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Select run mode
-        shell: bash
+      - name: Select scan mode
         env:
-          DISPATCH_MODE: ${{ inputs.mode }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_MODE: ${{ inputs.mode }}
         run: |
-          if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
-            echo "MODE=${DISPATCH_MODE:-probe}" >> "$GITHUB_ENV"
-          elif [[ "${{ github.event.schedule }}" == '30 2 * * 1-5' ]]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "MODE=${MANUAL_MODE:-probe}" >> "$GITHUB_ENV"
+          elif [ "$EVENT_SCHEDULE" = "30 2 * * 1-5" ]; then
             echo "MODE=intraday" >> "$GITHUB_ENV"
           else
             echo "MODE=main" >> "$GITHUB_ENV"
           fi
 
-      - name: Run scanner
-        run: python stock_alert.py
+      - name: Run Stock Alarm
+        run: |
+          if [ -f stock-alarm/stock_alarm.py ]; then
+            python stock-alarm/stock_alarm.py
+          elif [ -f stock_alarm.py ]; then
+            python stock_alarm.py
+          else
+            echo 'ERROR: stock-alarm/stock_alarm.py 파일이 없습니다.' >&2
+            exit 1
+          fi
 
       - name: Save history
-        if: always()
-        shell: bash
+        if: success()
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add history/*.csv 2>/dev/null || true
-          if ! git diff --cached --quiet; then
-            git commit -m 'Update stock history [skip ci]'
-            git push
+          if [ -d history ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add history/*.csv 2>/dev/null || true
+            if ! git diff --cached --quiet; then
+              git commit -m 'Update stock history [skip ci]'
+              git push
+            fi
           fi
