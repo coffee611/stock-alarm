@@ -1,34 +1,98 @@
-name: Stock Alarm Bot
+
+name: Stock Alarm
 
 on:
   schedule:
-    # 1. 오전 7:40 KST 실행 (UTC 전날 22:40 / 일~목요일 실행 -> 월~금 아침 수신)
-    - cron: '40 22 * * 0-4'
-    
-    # 2. 오후 6:40 KST 실행 (UTC 당일 09:40 / 월~금요일 실행 -> 월~금 저녁 수신)
-    - cron: '40 9 * * 1-5'
+    # 한국시간 오전 11:30
+    - cron: '30 2 * * 1-5'
+    # 한국시간 오후 18:50
+    - cron: '50 9 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '실행 모드'
+        type: choice
+        required: true
+        default: probe
+        options:
+          - probe
+          - main
+          - intraday
+      data_source:
+        description: '데이터 출처'
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - krx
+          - naver
+          - naver_first
+      force:
+        description: '휴장일 검사 생략'
+        type: boolean
+        default: false
 
-  workflow_dispatch: # 깃허브 웹에서 수동으로 테스트 실행할 수 있는 버튼 활성화
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-alarm-history
+  cancel-in-progress: false
+
 jobs:
-  run-bot:
+  scan:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    timeout-minutes: 120
+    env:
+      TZ: Asia/Seoul
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      KRX_ID: ${{ secrets.KRX_ID }}
+      KRX_PW: ${{ secrets.KRX_PW }}
+      DATA_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.data_source || 'auto' }}
+      FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'true' || 'false' }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+
+      - name: Install Korean fonts
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-nanum fonts-noto-cjk
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas finance-datareader requests lxml html5lib
+        run: python -m pip install -r requirements.txt
 
-      - name: Run stock screening bot
+      - name: Select run mode
+        shell: bash
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISPATCH_MODE: ${{ inputs.mode }}
         run: |
-          python main.py
+          if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
+            echo "MODE=${DISPATCH_MODE:-probe}" >> "$GITHUB_ENV"
+          elif [[ "${{ github.event.schedule }}" == '30 2 * * 1-5' ]]; then
+            echo "MODE=intraday" >> "$GITHUB_ENV"
+          else
+            echo "MODE=main" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run scanner
+        run: python stock_alert.py
+
+      - name: Save history
+        if: always()
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add history/*.csv 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update stock history [skip ci]'
+            git push
+          fi
