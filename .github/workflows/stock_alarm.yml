@@ -1,6 +1,5 @@
-
-name: Stock Alarm
-
+- name: Run Stock Alarm
+  run: python stock-alarm/stock_alarm.py
 on:
   schedule:
     # 한국시간 오전 11:30
