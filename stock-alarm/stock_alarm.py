@@ -2084,35 +2084,51 @@ RT_VOL = ["accumulatedTradingVolume", "tradingVolume", "volume", "accVolume", "a
 
 
 def fetch_realtime(codes):
-    """여러 종목의 현재가·누적 거래량·누적 거래대금을 한 번에 조회 -> {코드: dict}"""
+    """네이버 공개 실시간 API로 후보 종목의 현재가/누적거래량/거래대금 조회.
+
+    비공식 API라 변경될 수 있다. 실패한 종목은 임의의 전일 종가로 대체하지 않는다.
+    """
     out = {}
-    for i in range(0, len(codes), 20):
-        batch = codes[i:i + 20]
-        data = get_json(f"{S_BASE}/api/polling/domestic/stock?itemCodes={','.join(batch)}", retry=2)
-        lst = find_list(data) if data is not None else []
-        for d in lst:
-            code = str(pick(d, RT_CODE) or "")
-            if not code:
+    today = dt.datetime.now(KST).strftime("%Y-%m-%d")
+
+    for code in dict.fromkeys(str(c).zfill(6) for c in codes):
+        url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
+        data = get_json(url, retry=2)
+        items = data.get("datas", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            continue
+
+        for d in items:
+            if not isinstance(d, dict) or str(d.get("itemCode", "")) != code:
                 continue
+
+            # 과거 날짜의 값을 장중 현재가로 오인하지 않도록 확인한다.
+            traded_at = str(d.get("localTradedAt") or "")
+            if not traded_at.startswith(today):
+                print(f"장중 시세 기준일 불일치: {code} / {traded_at or '날짜 없음'}")
+                continue
+
+            price = to_num(pick(d, ["closePriceRaw", "closePrice", "currentPrice"]))
+            vol = to_num(pick(d, ["accumulatedTradingVolumeRaw", "accumulatedTradingVolume"]))
+            value = to_num(pick(d, ["accumulatedTradingValueRaw"]))
+
+            if not (np.isfinite(price) and price > 0 and np.isfinite(vol) and vol >= 0):
+                print(f"장중 시세 필수 항목 누락: {code}")
+                continue
+
+            # KRX 정규장 거래대금/거래량: 응답의 원 단위 raw 필드를 사용.
+            # 금액 raw가 없으면 오차가 큰 '현재가 x 누적거래량'으로 대체하지 않는다.
+            out[code] = {
+                "price": price,
+                "vol": vol,
+                "val_raw": value,
+                "val": value if np.isfinite(value) and value >= 0 else float("nan"),
+            }
             if not LAST_INFO["keys"]:
                 LAST_INFO["keys"] = ", ".join(list(d.keys())[:20])
-            out[code] = {"price": to_num(pick(d, RT_PRICE)), "vol": to_num(pick(d, RT_VOL)),
-                         "val_raw": to_num(val_value(d))}
-    # 거래대금 단위 보정 (없으면 현재가 x 누적 거래량으로 추정)
-    ratios = [v["val_raw"] / (v["price"] * v["vol"]) for v in out.values()
-              if v["val_raw"] == v["val_raw"] and v["val_raw"] > 0 and v["price"] > 0 and v["vol"] > 0]
-    factor, est = 1.0, True
-    if len(ratios) >= 3:
-        med = float(np.median(ratios))
-        for f in (1, 1e3, 1e4, 1e6, 1e8):
-            if 0.5 <= med * f <= 2.0:
-                factor, est = f, False
-                break
-    for v in out.values():
-        if not est and v["val_raw"] == v["val_raw"] and v["val_raw"] > 0:
-            v["val"] = v["val_raw"] * factor
-        else:
-            v["val"] = v["price"] * v["vol"] if v["price"] > 0 and v["vol"] > 0 else float("nan")
+            break
+
+    print(f"장중 시세 조회: 요청 {len(codes)}종목 / 성공 {len(out)}종목")
     return out
 
 
